@@ -1,0 +1,1 @@
+"This project utilizes Sparse Upcycling to convert a dense Vision-Language Model into a Mixture-of-Experts architecture. By employing Knowledge Distillation and QLoRA, we train a load-balanced gating network to conditionally route multimodal tokens, achieving MoEfication for constrained edge deployment."
