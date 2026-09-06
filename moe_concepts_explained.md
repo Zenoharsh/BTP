@@ -47,3 +47,20 @@ This is just a safe testing ground to make sure our Receptionist and Doctors are
 - We hand this fake doctor to our `MoELayer`, which dutifully creates 4 copies of it.
 - **`x = torch.randn(...)`**: We generate some completely random fake data (our fake patients).
 - We push the fake data through the `MoELayer` to ensure that it doesn't crash, that the data comes out the other side in the exact same shape it went in, and that our "fairness penalty" (auxiliary loss) calculates a valid number.
+
+---
+
+## 4. The Training Ground: `train.py`
+
+This file orchestrates the actual learning process using a technique called **Knowledge Distillation** and a memory-saving trick called **QLoRA**.
+
+**The Analogy:**
+Imagine we have an experienced, fully-trained senior doctor (the **Teacher**). We want our new hospital with the receptionist and specialized doctors (the **Student**) to be just as smart as the senior doctor. So, we give them both the exact same medical cases (data) and ask for their diagnoses. If the Student's diagnosis is different from the Teacher's, the Student is penalized and forced to adjust.
+
+**What the code does:**
+- **`setup_models`**: We load two models. The Teacher is "frozen" (it can't learn or change, just observe). The Student is modified so its general practitioners are ripped out and replaced by our `MoELayer` (the specialized doctors).
+- **QLoRA (Low-Rank Adaptation)**: Training massive AI models normally requires supercomputers. QLoRA is a clever trick where we "freeze" almost the entire Student model and only add tiny, trainable "sticky notes" (adapters) to our specific experts. This lets us train the model on a standard machine instead of a massive server cluster.
+- **`train_step`**: This is where the learning happens for a single batch of data. 
+  - Both the Teacher and Student make a prediction.
+  - **Knowledge Distillation (KD) Loss**: The mathematical difference between the Teacher's prediction and the Student's prediction. The Student tries to minimize this difference to mimic the Teacher perfectly.
+  - **Total Loss**: We combine the KD Loss with the Receptionist's fairness penalty (Auxiliary Loss). This forces the model to learn how to mimic the Teacher *while simultaneously* keeping the workload balanced among the experts!

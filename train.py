@@ -1,5 +1,8 @@
 import torch
 import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from datasets import load_dataset
+from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model
 from layers import MoELayer
@@ -105,3 +108,84 @@ def train_step(batch, teacher_model, student_model, optimizer, temperature=2.0):
     
     aux_val = student_aux_loss.item() if isinstance(student_aux_loss, torch.Tensor) else student_aux_loss
     return total_loss.item(), kd_loss.item(), aux_val
+
+class CaptionDataset(Dataset):
+    def __init__(self, tokenizer, max_length=128):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        print("Loading lightweight dataset...")
+        # Using a small, lightweight public image-caption dataset for quick testing
+        self.dataset = load_dataset("lambdalabs/pokemon-blip-captions", split="train[:5%]")
+        
+    def __len__(self):
+        return len(self.dataset)
+        
+    def __getitem__(self, idx):
+        # Qwen1.5-0.5B is a purely Causal LM, so we extract just the text captions
+        # to simulate the VLM text-processing step without crashing the text-only processor.
+        return self.dataset[idx]['text']
+
+def collate_fn(batch, tokenizer, max_length=128):
+    # Tokenize the batch of captions and dynamically pad
+    tokens = tokenizer(
+        batch, 
+        padding=True, 
+        truncation=True, 
+        max_length=max_length, 
+        return_tensors="pt"
+    )
+    return {
+        "input_ids": tokens["input_ids"],
+        "attention_mask": tokens["attention_mask"]
+    }
+
+def main():
+    print("Starting Training Pipeline...")
+    model_id = "Qwen/Qwen1.5-0.5B"
+    
+    # 1. Setup Models
+    teacher, student = setup_models(model_id)
+    
+    # 2. Initialize Tokenizer 
+    # Qwen tokenizer often lacks a default pad_token
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        
+    # 3. Setup Data Pipeline
+    dataset = CaptionDataset(tokenizer)
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=4, 
+        shuffle=True, 
+        collate_fn=lambda b: collate_fn(b, tokenizer)
+    )
+    
+    # 4. Setup Optimizer
+    # Only optimizing the unfrozen parameters (LoRA weights and Routers)
+    optimizer = AdamW(filter(lambda p: p.requires_grad, student.parameters()), lr=2e-4)
+    
+    num_epochs = 3
+    print(f"Beginning training for {num_epochs} epochs...")
+    
+    global_step = 0
+    for epoch in range(num_epochs):
+        print(f"\n--- Epoch {epoch+1}/{num_epochs} ---")
+        student.train()
+        
+        for step, batch in enumerate(dataloader):
+            total_loss, kd_loss, aux_loss = train_step(batch, teacher, student, optimizer)
+            global_step += 1
+            
+            # 5. Logging every 10 steps
+            if global_step % 10 == 0:
+                print(f"Step {global_step} | Total Loss: {total_loss:.4f} | KD Loss: {kd_loss:.4f} | Aux Loss: {aux_loss:.4f}")
+                
+    # 6. Save Checkpoint
+    print("\nTraining Complete! Saving PEFT Checkpoint...")
+    student.save_pretrained("./sparse_moe_checkpoint")
+    tokenizer.save_pretrained("./sparse_moe_checkpoint")
+    print("Saved to ./sparse_moe_checkpoint successfully.")
+
+if __name__ == "__main__":
+    main()
