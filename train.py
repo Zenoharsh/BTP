@@ -11,7 +11,7 @@ def setup_models(model_id="Qwen/Qwen1.5-0.5B"):
     print("Loading Teacher Model...")
     # 1. Load Teacher (Frozen)
     teacher = AutoModelForCausalLM.from_pretrained(
-        model_id, torch_dtype=torch.float16, device_map="auto"
+        model_id, torch_dtype=torch.float16, device_map={"": 0}
     )
     teacher.eval()
     for param in teacher.parameters():
@@ -25,7 +25,7 @@ def setup_models(model_id="Qwen/Qwen1.5-0.5B"):
         bnb_4bit_quant_type="nf4"
     )
     student = AutoModelForCausalLM.from_pretrained(
-        model_id, quantization_config=bnb_config, device_map="auto"
+        model_id, quantization_config=bnb_config, device_map={"": 0}
     )
 
     print("Performing Architecture Surgery...")
