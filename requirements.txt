@@ -1,0 +1,8 @@
+torch
+transformers
+peft
+bitsandbytes
+accelerate
+datasets
+einops
+python-pptx
