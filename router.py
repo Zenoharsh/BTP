@@ -15,7 +15,14 @@ class TopKRouter(nn.Module):
         if len(original_shape) > 2:
             hidden_states = hidden_states.view(-1, original_shape[-1])
             
-        logits = self.gate(hidden_states)
+        # Device Guard: Ensure router parameters match hidden_states device
+        if self.gate.weight.device != hidden_states.device:
+            self.gate = self.gate.to(hidden_states.device)
+
+        # Dtype Guard: Cast hidden_states to match gate dtype (typically float32 for Z-loss stability)
+        gate_input = hidden_states.to(dtype=self.gate.weight.dtype)
+
+        logits = self.gate(gate_input)
         
         # 1. Router Z-Loss: Penalize large logits to prevent fp16 overflow
         z_loss = torch.logsumexp(logits, dim=-1).pow(2).mean()

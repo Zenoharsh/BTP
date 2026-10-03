@@ -34,8 +34,8 @@ def setup_models(model_id="Qwen/Qwen2-VL-2B-Instruct"):
     student.gradient_checkpointing_enable()
 
     print("Performing Architecture Surgery (Sparse Upcycling)...")
-    hidden_size = student.config.hidden_size
-    for i, layer in enumerate(student.model.layers):
+    hidden_size = student.config.text_config.hidden_size
+    for i, layer in enumerate(student.model.language_model.layers):
         original_mlp = layer.mlp
         moe_layer = MoELayer(original_mlp, hidden_size=hidden_size, num_experts=4)
         layer.mlp = moe_layer
@@ -72,7 +72,7 @@ class LazyMultimodalDataset(Dataset):
         # Parse train.json lazily. DO NOT load images into RAM here.
         if not os.path.exists(json_path):
             print(f"Warning: {json_path} not found. Creating a dummy file.")
-            self.data = [{"image": "dummy.jpg", "text": "Extract OCR from this document."}]
+            self.data = [{"image": "dummy.jpg", "question": "What is in the image?", "answer": "A document."}]
         else:
             with open(json_path, 'r') as f:
                 self.data = json.load(f)
@@ -97,7 +97,13 @@ class LazyMultimodalDataset(Dataset):
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image},
-                    {"type": "text", "text": item["text"]},
+                    {"type": "text", "text": item.get("question", "")},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": item.get("answer", "")},
                 ],
             }
         ]
@@ -131,7 +137,7 @@ def train_step(batch, teacher_model, student_model, temperature=2.0):
     
     # 3. Extract and aggregate the Aux Losses from all custom MoE Layers
     student_aux_loss = 0.0
-    for layer in student_model.model.layers:
+    for layer in student_model.model.model.language_model.layers:
         if hasattr(layer.mlp, 'latest_aux_loss'):
             student_aux_loss += layer.mlp.latest_aux_loss
             
