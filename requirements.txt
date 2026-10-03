@@ -6,3 +6,5 @@ accelerate
 datasets
 einops
 python-pptx
+torchvision
+qwen-vl-utils

@@ -1,4 +1,28 @@
+# Virtual Environments
 venv/
+env/
+.venv/
+
+# Python Cache
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# IDE and System Files
+.vscode/
+.idea/
 .DS_Store
+
+# Generated Checkpoints & Logs
+qwen2vl_sparse_moe_checkpoint/
+*.log
+
+# Dataset and Mounts
+drive_mount/
+*.json
+
+# Generated Images and Plots
+*.png
+*.jpg
+*.jpeg
+Fig*.png

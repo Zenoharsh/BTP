@@ -3,51 +3,52 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class TopKRouter(nn.Module):
-    def __init__(self, hidden_size: int, num_experts: int = 4, top_k: int = 2, alpha: float = 0.01, z_loss_coeff: float = 0.001):
+    def __init__(self, hidden_size, num_experts, top_k=2):
         super().__init__()
         self.num_experts = num_experts
         self.top_k = top_k
-        self.alpha = alpha
-        self.z_loss_coeff = z_loss_coeff
+        self.gate = nn.Linear(hidden_size, num_experts, bias=False)
         
-        # Gating network
-        self.gating = nn.Linear(hidden_size, num_experts, bias=False)
-        
-    def forward(self, hidden_states: torch.Tensor):
-        # Flatten batch and seq dimensions if needed
+    def forward(self, hidden_states):
+        # Ensure input is 2D: [num_tokens, hidden_size]
         original_shape = hidden_states.shape
         if len(original_shape) > 2:
             hidden_states = hidden_states.view(-1, original_shape[-1])
             
-        logits = self.gating(hidden_states)
+        logits = self.gate(hidden_states)
         
-        # Get raw probabilities over all experts for auxiliary loss
-        routing_probs = F.softmax(logits, dim=-1)
+        # 1. Router Z-Loss: Penalize large logits to prevent fp16 overflow
+        z_loss = torch.logsumexp(logits, dim=-1).pow(2).mean()
+        
+        # 2. Routing probabilities
+        routing_weights = F.softmax(logits, dim=-1, dtype=torch.float32)
         
         # Top-K selection
-        topk_logits, expert_indices = torch.topk(logits, self.top_k, dim=-1)
+        top_k_weights, top_k_indices = torch.topk(routing_weights, self.top_k, dim=-1)
         
-        # Normalize top-k probabilities (for multiplying with expert outputs)
-        routing_weights = F.softmax(topk_logits, dim=-1)
+        # Normalize top-K weights so they sum to 1 for each token
+        top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
         
-        # Compute Load Balancing Auxiliary Loss
-        # 1. Token fraction per expert (f_i)
-        expert_mask = F.one_hot(expert_indices, num_classes=self.num_experts).sum(dim=1).float()
-        token_fraction = expert_mask.mean(dim=0)
+        # 3. Load-Balancing Loss
+        # We need the fraction of tokens routed to each expert
+        zeros = torch.zeros_like(routing_weights)
+        token_to_expert_mask = zeros.scatter(-1, top_k_indices, 1.0)
         
-        # 2. Mean routing probability per expert (P_i)
-        mean_routing_prob = routing_probs.mean(dim=0)
+        # Fraction of tokens dispatched to each expert
+        tokens_per_expert = token_to_expert_mask.mean(dim=0)
         
-        # 3. Auxiliary Loss calculation
-        aux_loss = self.alpha * self.num_experts * torch.sum(token_fraction * mean_routing_prob)
+        # Average routing probability assigned to each expert across all tokens
+        router_prob_per_expert = routing_weights.mean(dim=0)
         
-        # Compute Router Z-Loss
-        z_loss = torch.mean(torch.square(torch.logsumexp(logits, dim=-1)))
-        aux_loss = aux_loss + self.z_loss_coeff * z_loss
+        # Load balancing loss = num_experts * sum(fraction_of_tokens * avg_prob)
+        balancing_loss = self.num_experts * torch.sum(tokens_per_expert * router_prob_per_expert)
         
-        # Reshape back to original shape if necessary
+        # Combine losses
+        aux_loss = balancing_loss + 0.001 * z_loss
+        
+        # Reshape back to original dimensions if needed
         if len(original_shape) > 2:
-            routing_weights = routing_weights.view(*original_shape[:-1], self.top_k)
-            expert_indices = expert_indices.view(*original_shape[:-1], self.top_k)
+            top_k_weights = top_k_weights.view(*original_shape[:-1], self.top_k)
+            top_k_indices = top_k_indices.view(*original_shape[:-1], self.top_k)
             
-        return routing_weights, expert_indices, aux_loss
+        return top_k_weights.to(hidden_states.dtype), top_k_indices, aux_loss
