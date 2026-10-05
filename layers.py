@@ -1,10 +1,60 @@
 import torch
 import torch.nn as nn
-import copy
+import math
 from router import TopKRouter
 
+class ExpertLoRA(nn.Module):
+    def __init__(self, hidden_size, intermediate_size, rank=16, alpha=32):
+        super().__init__()
+        self.scaling = alpha / rank
+        self.gate_A = nn.Linear(hidden_size, rank, bias=False)
+        self.gate_B = nn.Linear(rank, intermediate_size, bias=False)
+        self.up_A = nn.Linear(hidden_size, rank, bias=False)
+        self.up_B = nn.Linear(rank, intermediate_size, bias=False)
+        self.down_A = nn.Linear(intermediate_size, rank, bias=False)
+        self.down_B = nn.Linear(rank, hidden_size, bias=False)
+        
+        nn.init.zeros_(self.gate_B.weight)
+        nn.init.zeros_(self.up_B.weight)
+        nn.init.zeros_(self.down_B.weight)
+
+class SharedBaseLoRAExpert(nn.Module):
+    def __init__(self, original_mlp, hidden_size, intermediate_size, num_experts, rank=16, alpha=32):
+        super().__init__()
+        # Shared frozen base
+        self.base_mlp = original_mlp
+        for param in self.base_mlp.parameters():
+            param.requires_grad = False
+            
+        # Independent LoRA adapters per expert
+        self.experts = nn.ModuleList([
+            ExpertLoRA(hidden_size, intermediate_size, rank, alpha) 
+            for _ in range(num_experts)
+        ])
+        self.act_fn = nn.SiLU()
+
+    def forward(self, x, expert_idx):
+        expert = self.experts[expert_idx]
+        
+        # Base outputs
+        base_gate = self.base_mlp.gate_proj(x)
+        base_up = self.base_mlp.up_proj(x)
+        
+        # LoRA outputs
+        lora_gate = expert.gate_B(expert.gate_A(x)) * expert.scaling
+        lora_up = expert.up_B(expert.up_A(x)) * expert.scaling
+        
+        # Combined activations
+        intermediate = self.act_fn(base_gate + lora_gate) * (base_up + lora_up)
+        
+        # Down projection
+        base_down = self.base_mlp.down_proj(intermediate)
+        lora_down = expert.down_B(expert.down_A(intermediate)) * expert.scaling
+        
+        return base_down + lora_down
+
 class MoELayer(nn.Module):
-    def __init__(self, original_mlp, hidden_size, num_experts=4, top_k=2, capacity_factor=1.25):
+    def __init__(self, original_mlp, hidden_size, intermediate_size, num_experts=4, top_k=1, capacity_factor=1.25):
         super().__init__()
         self.num_experts = num_experts
         self.top_k = top_k
@@ -12,76 +62,67 @@ class MoELayer(nn.Module):
         
         self.router = TopKRouter(hidden_size, num_experts, top_k=top_k)
         
-        # Clone original Qwen2MLP into 4 independent experts
-        self.experts = nn.ModuleList([copy.deepcopy(original_mlp) for _ in range(num_experts)])
+        self.shared_experts = SharedBaseLoRAExpert(
+            original_mlp, hidden_size, intermediate_size, num_experts
+        )
         
-        # Native Hugging Face models don't expect a tuple (output, loss) from MLPs.
-        # We store it here and extract it during the training loop.
-        self.latest_aux_loss = 0.0
-        
+        self.metrics = {}
+
     def forward(self, hidden_states):
         original_shape = hidden_states.shape
-        # Flatten to [num_tokens, hidden_size] for processing
         hidden_states = hidden_states.view(-1, original_shape[-1])
         num_tokens = hidden_states.shape[0]
         
-        # 1. Routing
-        routing_weights, expert_indices, aux_loss = self.router(hidden_states)
-        self.latest_aux_loss = aux_loss
+        routing_weights, expert_indices, router_metrics = self.router(hidden_states)
+        self.metrics = router_metrics
         
-        # Because we flattened the input above, the router returns [num_tokens, top_k] 
         final_output = torch.zeros_like(hidden_states)
         
-        # 2. Strict Capacity Constraints (Token Dropping)
-        # Total tokens dispatched = num_tokens * top_k
-        expert_capacity = int((num_tokens * self.top_k / self.num_experts) * self.capacity_factor)
-        
-        # 3. Process each expert
-        for i, expert in enumerate(self.experts):
-            # Find tokens assigned to this expert across any of their top_k choices
-            expert_mask = (expert_indices == i) # [num_tokens, top_k] boolean mask
-            token_mask = expert_mask.any(dim=-1) # [num_tokens] boolean mask
+        # P0-3: Strict capacity semantics
+        expert_capacity = int(math.ceil((num_tokens / self.num_experts) * self.capacity_factor))
+        dropped_tokens_total = 0
+        processed_mask = torch.zeros(num_tokens, dtype=torch.bool, device=hidden_states.device)
+
+        for i in range(self.num_experts):
+            expert_mask = (expert_indices == i)
+            token_mask = expert_mask.any(dim=-1)
             
-            if not token_mask.any():
+            num_assigned = token_mask.sum().item()
+            if num_assigned == 0:
                 continue
                 
-            num_assigned_tokens = token_mask.sum().item()
-            
-            # Only apply token dropping during training
-            if self.training and num_assigned_tokens > expert_capacity:
-                # Token Dropping: Too many tokens assigned. We must select the top `expert_capacity` tokens 
-                # based on their routing weight to THIS specific expert.
-                
-                # Extract the routing weight specifically for this expert
+            if self.training and num_assigned > expert_capacity:
                 assigned_weights = routing_weights[expert_mask]
-                
-                # Get the indices of the assigned tokens in the [num_tokens] dimension
                 token_idx = token_mask.nonzero(as_tuple=True)[0]
-                
-                # Sort the assigned tokens by their routing weight
                 _, sorted_idx = torch.topk(assigned_weights, expert_capacity)
                 top_token_idx = token_idx[sorted_idx]
                 
-                # Create a new mask that drops the lower-weighted tokens (they bypass this expert entirely)
                 new_token_mask = torch.zeros_like(token_mask)
                 new_token_mask[top_token_idx] = True
-                token_mask = new_token_mask
                 
-            # Extract the tokens that survived the capacity check
+                dropped = num_assigned - expert_capacity
+                dropped_tokens_total += dropped
+                
+                token_mask = new_token_mask
+
             expert_tokens = hidden_states[token_mask]
+            expert_output = self.shared_experts(expert_tokens, expert_idx=i)
             
-            # Forward pass through the cloned Qwen2MLP expert
-            expert_output = expert(expert_tokens)
-            
-            # Apply routing weights
             selected_expert_mask = expert_mask[token_mask]
             selected_weights = routing_weights[token_mask]
             weight_per_token = selected_weights[selected_expert_mask].unsqueeze(-1)
             
-            # Weight the output and accumulate
             final_output[token_mask] += expert_output * weight_per_token
-            
-        # 4. Reconstruct original 3D shape
-        final_output = final_output.view(*original_shape)
+            processed_mask[token_mask] = True
+
+        # Fallback path for dropped tokens (Zero-LoRA base MLP path)
+        unprocessed_mask = ~processed_mask
+        if unprocessed_mask.any():
+            unprocessed_tokens = hidden_states[unprocessed_mask]
+            fallback_output = self.shared_experts.base_mlp(unprocessed_tokens)
+            final_output[unprocessed_mask] += fallback_output
+
+        self.metrics["drop_rate"] = dropped_tokens_total / num_tokens if num_tokens > 0 else 0.0
         
+        final_output = final_output.view(*original_shape)
         return final_output
