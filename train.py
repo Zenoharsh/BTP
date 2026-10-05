@@ -51,6 +51,7 @@ def setup_models(model_id="Qwen/Qwen2-VL-2B-Instruct"):
             ".*experts.*up_proj.*", 
             ".*experts.*down_proj.*"
         ],
+        modules_to_save=["router"],
         bias="none",
         task_type="CAUSAL_LM"
     )
@@ -82,11 +83,14 @@ class LazyMultimodalDataset(Dataset):
         
     def __getitem__(self, idx):
         item = self.data[idx]
-        image_path = os.path.join(self.base_image_dir, item["image"])
+        filename = item["image"].replace("images/", "")
+        image_path = os.path.join(self.base_image_dir, filename)
         
         # LAZY LOAD: Fetch from disk / GDrive mount exactly when requested by the dataloader
         try:
             image = Image.open(image_path).convert("RGB")
+            # Downscale high-res documents to prevent thousands of visual tokens (and PCIe swapping)
+            image.thumbnail((512, 512))
         except FileNotFoundError:
             # Fallback for structural testing
             image = Image.new('RGB', (224, 224), color='white')
@@ -108,7 +112,7 @@ class LazyMultimodalDataset(Dataset):
             }
         ]
         
-        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
         return {"text": text, "image": image}
 
 def collate_fn(batch, processor):
@@ -161,47 +165,53 @@ def train_step(batch, teacher_model, student_model, temperature=2.0):
     return total_loss, kd_loss.item(), (student_aux_loss.item() if isinstance(student_aux_loss, torch.Tensor) else student_aux_loss)
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Train Qwen2-VL Sparse MoE")
+    parser.add_argument("--data", type=str, default="train.json", help="Path to training JSON")
+    parser.add_argument("--epochs", type=int, default=3, help="Number of epochs")
+    parser.add_argument("--batch_size", type=int, default=1, help="Batch size (1 for RTX 3050)")
+    parser.add_argument("--accum_steps", type=int, default=16, help="Gradient accumulation steps")
+    parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
+    args = parser.parse_args()
+
     print("Initializing Qwen2-VL Sparse MoE Edge-Constrained Pipeline...")
     model_id = "Qwen/Qwen2-VL-2B-Instruct"
     
     teacher, student = setup_models(model_id)
     processor = AutoProcessor.from_pretrained(model_id)
     
-    dataset = LazyMultimodalDataset(processor, json_path="train.json", base_image_dir="./drive_mount/")
+    dataset = LazyMultimodalDataset(processor, json_path=args.data, base_image_dir="./drive_mount/")
     
-    # Memory Constraint: batch_size=1 is mandatory for RTX 3050 (4GB)
     dataloader = DataLoader(
         dataset, 
-        batch_size=1, 
+        batch_size=args.batch_size, 
         shuffle=True, 
         collate_fn=lambda b: collate_fn(b, processor)
     )
     
-    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, student.parameters()), lr=2e-4)
+    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, student.parameters()), lr=args.lr)
     
-    num_epochs = 3
-    gradient_accumulation_steps = 16  # Simulates batch_size=16 without the VRAM hit
-    print(f"Beginning training for {num_epochs} epochs with accum_steps={gradient_accumulation_steps}...")
+    print(f"Beginning training for {args.epochs} epochs with accum_steps={args.accum_steps}, batch_size={args.batch_size}, lr={args.lr}...")
     
     global_step = 0
     student.train()
     optimizer.zero_grad()
     
-    for epoch in range(num_epochs):
+    for epoch in range(args.epochs):
         for step, batch in enumerate(dataloader):
             total_loss, kd_loss, aux_loss = train_step(batch, teacher, student)
             
             # Normalize loss for gradient accumulation
-            total_loss = total_loss / gradient_accumulation_steps
+            total_loss = total_loss / args.accum_steps
             total_loss.backward()
             
             # Perform optimization step only after accumulating N gradients
-            if (step + 1) % gradient_accumulation_steps == 0:
+            if (step + 1) % args.accum_steps == 0 or (step + 1) == len(dataloader):
                 optimizer.step()
                 optimizer.zero_grad()
                 global_step += 1
                 
-                print(f"Epoch {epoch+1} | Step {global_step} | Total Loss: {total_loss.item() * gradient_accumulation_steps:.4f} | KD Loss: {kd_loss:.4f} | Aux Loss: {aux_loss:.4f}")
+                print(f"Epoch {epoch+1} | Step {global_step} | Total Loss: {total_loss.item() * args.accum_steps:.4f} | KD Loss: {kd_loss:.4f} | Aux Loss: {aux_loss:.4f}")
             
     print("\nTraining Complete! Saving QLoRA Checkpoint...")
     student.save_pretrained("./qwen2vl_sparse_moe_checkpoint")

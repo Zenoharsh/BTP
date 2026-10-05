@@ -47,7 +47,8 @@ class MoELayer(nn.Module):
                 
             num_assigned_tokens = token_mask.sum().item()
             
-            if num_assigned_tokens > expert_capacity:
+            # Only apply token dropping during training
+            if self.training and num_assigned_tokens > expert_capacity:
                 # Token Dropping: Too many tokens assigned. We must select the top `expert_capacity` tokens 
                 # based on their routing weight to THIS specific expert.
                 
