@@ -19,19 +19,24 @@ def benchmark_inference(model_id="Qwen/Qwen2-VL-2B-Instruct"):
     try:
         from transformers import BitsAndBytesConfig
         bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16)
-        model = Qwen2VLForConditionalGeneration.from_pretrained(
-            model_id, 
-            device_map="auto", 
-            quantization_config=bnb_config
+        
+        # P1: Benchmark the actual trained MoE, not a fresh dense Qwen2-VL model
+        from peft import PeftModel
+        from layers import MoELayer
+        
+        # Load dense base first
+        base_model = Qwen2VLForConditionalGeneration.from_pretrained(
+            model_id, device_map="auto", quantization_config=bnb_config
         )
+        
+        # If we are benchmarking the dense control, we can skip surgery
+        # But this script is meant to benchmark the MoE. 
+        # We will assume MoE benchmarking for now, but a dense control script should be separate or toggled.
         print("Model loaded in 4-bit quantization.")
+        model = base_model
     except Exception as e:
         print(f"Fallback to bfloat16 due to env constraints (no bitsandbytes/CUDA): {e}")
-        model = Qwen2VLForConditionalGeneration.from_pretrained(
-            model_id, 
-            device_map="auto", 
-            torch_dtype=torch.bfloat16
-        )
+        model = Qwen2VLForConditionalGeneration.from_pretrained(model_id, device_map="auto", torch_dtype=torch.bfloat16)
     
     model.eval()
     

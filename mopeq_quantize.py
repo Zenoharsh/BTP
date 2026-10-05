@@ -2,11 +2,11 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-def hutchinsons_hessian_trace(expert_module, num_samples=10, hidden_size=1536):
+def gradient_squared_proxy_trace(expert_module, num_samples=10, hidden_size=1536):
     """
-    Approximates the trace of the Hessian for an expert using Hutchinson's estimator.
-    Tr(H) ~ E[v^T H v] where v is drawn from N(0, I).
-    Since we are doing this data-free, we simulate the forward/backward pass with random v.
+    Computes a gradient-squared proxy for sensitivity. 
+    NOTE: This is NOT the exact Hutchinson Hessian-vector product.
+    This serves as a mock profiler before actual post-training quantization is implemented.
     """
     # Assuming CPU since it's a simulated script, but use cuda if available
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -91,9 +91,9 @@ def main():
     
     # 2. Evaluate Hessian Trace for each expert
     expert_traces = {}
-    print("\nApproximating Hessian Trace via Hutchinson's Estimator...")
+    print("\nApproximating sensitivity via Gradient-Squared Proxy...")
     for name, expert in experts.items():
-        trace = hutchinsons_hessian_trace(expert, num_samples=10, hidden_size=hidden_size)
+        trace = gradient_squared_proxy_trace(expert, num_samples=10, hidden_size=hidden_size)
         expert_traces[name] = trace
         
     # 3. Cluster and assign bit-widths

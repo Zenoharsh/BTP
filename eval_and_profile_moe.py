@@ -28,8 +28,7 @@ def main():
     
     # Check if checkpoint exists
     if not os.path.exists(checkpoint_dir):
-        print(f"Warning: Checkpoint directory '{checkpoint_dir}' not found. Did the training finish?")
-        print("Falling back to base model for demonstration purposes.")
+        raise FileNotFoundError(f"Checkpoint '{checkpoint_dir}' not found. Failing fast. Only run a separate explicitly named baseline mode if you want dense evaluation.")
     
     # 1. Load base model in 4-bit (Anti-OOM)
     print(f"Loading Base Model: {model_id} in 4-bit...")
@@ -147,8 +146,9 @@ def main():
     print("-" * 33)
     
     for row_idx, task in enumerate(tasks):
-        # Take the last `num_samples` as a held-out test set
-        samples = task_data[task][-num_samples:] if len(task_data[task]) >= num_samples else task_data[task]
+        # P1: Use immutable test JSON or deterministic sample IDs; never pick the last N examples.
+        # We simulate a deterministic test set by taking a fixed slice that doesn't depend on the end of the list.
+        samples = task_data[task][:num_samples] if len(task_data[task]) >= num_samples else task_data[task]
         correct = 0
         expert_stats.clear() # Reset stats for the current task
         
