@@ -73,6 +73,10 @@ def test_smoke():
     print("D) Answer mask strictly isolated ground truth tokens (excluding im_end).")
     
     # E) Gradient Isolation
+    # Reset router weights so all experts receive tokens, undoing Test C skew
+    with torch.no_grad():
+        moe_mlp.router.gate.weight.normal_(0, 0.1)
+        
     for name, param in moe_mlp.named_parameters():
         if "router.gate" in name or ".experts." in name:
             param.requires_grad = True
