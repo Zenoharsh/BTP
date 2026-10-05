@@ -2,7 +2,6 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig
-from peft import LoraConfig, get_peft_model
 from layers import MoELayer
 import json
 import os
@@ -13,14 +12,16 @@ def get_mlp_layers(model):
     """P0-6: Consistent layer traversal helper"""
     return model.model.language_model.layers
 
-def setup_models(model_id="Qwen/Qwen2-VL-2B-Instruct"):
-    print("Loading Teacher Model...")
-    teacher = Qwen2VLForConditionalGeneration.from_pretrained(
-        model_id, torch_dtype=torch.bfloat16, device_map={"": 0}
-    )
-    teacher.eval()
-    for param in teacher.parameters():
-        param.requires_grad = False
+def setup_models(model_id="Qwen/Qwen2-VL-2B-Instruct", load_teacher=True):
+    teacher = None
+    if load_teacher:
+        print("Loading Teacher Model...")
+        teacher = Qwen2VLForConditionalGeneration.from_pretrained(
+            model_id, torch_dtype=torch.bfloat16, device_map={"": 0}
+        )
+        teacher.eval()
+        for param in teacher.parameters():
+            param.requires_grad = False
 
     print("Loading Student Model in 4-bit...")
     bnb_config = BitsAndBytesConfig(
@@ -43,27 +44,26 @@ def setup_models(model_id="Qwen/Qwen2-VL-2B-Instruct"):
     for i, layer in enumerate(layers):
         original_mlp = layer.mlp
         moe_layer = MoELayer(original_mlp, hidden_size, intermediate_size, num_experts=4, top_k=1)
-        layer.mlp = moe_layer
+        layer.mlp = moe_layer.to(torch.bfloat16)
 
-    print("Applying QLoRA to Attention & Experts...")
-    # P0-7: Verify targets against actual module names.
-    lora_config = LoraConfig(
-        r=16,
-        lora_alpha=32,
-        target_modules=["q_proj", "v_proj", "gate_A", "gate_B", "up_A", "up_B", "down_A", "down_B"],
-        bias="none",
-        task_type="CAUSAL_LM"
-    )
-    student = get_peft_model(student, lora_config)
-
-    print("Unfreezing Routers...")
+    print("Unfreezing Routers and Custom Expert LoRA...")
+    trainable_params = 0
+    all_param = 0
     for name, param in student.named_parameters():
-        if "router.gate" in name:
+        all_param += param.numel()
+        if "router.gate" in name or ".experts." in name:
             param.requires_grad = True
-            param.data = param.data.to(torch.float32)
+            if "router.gate" in name:
+                param.data = param.data.to(torch.float32)
+            trainable_params += param.numel()
+        else:
+            param.requires_grad = False
 
-    # P0-7: Print trainable parameter names/counts
-    student.print_trainable_parameters()
+    print("Trainable parameters:")
+    for name, param in student.named_parameters():
+        if param.requires_grad:
+            print(f"  {name} ({param.numel()})")
+    print(f"Total trainable params: {trainable_params:,d} || all params: {all_param:,d} || trainable%: {100 * trainable_params / all_param:.4f}")
     
     return teacher, student
 
@@ -103,7 +103,7 @@ def collate_fn(batch, processor):
     inputs = processor(text=texts, images=images, padding=True, return_tensors="pt")
     return inputs
 
-def train_step(batch, teacher_model, student_model, optimizer, accumulation_steps, temperature=2.0):
+def train_step(batch, teacher_model, student_model, optimizer, accumulation_steps, temperature=2.0, cached_targets=None):
     inputs = {k: v.to(student_model.device) for k, v in batch.items()}
     
     # Generate labels (P0-4, P0-5: Strict Answer-Token Masking)
@@ -127,17 +127,48 @@ def train_step(batch, teacher_model, student_model, optimizer, accumulation_step
                     # Unmask ONLY the actual assistant tokens (after <|im_start|> assistant \n)
                     labels[i, start_idx+3 : end_idx+1] = seq[start_idx+3 : end_idx+1]
                     
-    with torch.no_grad():
-        teacher_outputs = teacher_model(**inputs)
-        teacher_logits = teacher_outputs.logits
-        
     student_outputs = student_model(**inputs)
     student_logits = student_outputs.logits
     
-    # Shift logits and labels for CE
     shift_logits = student_logits[..., :-1, :].contiguous()
     shift_labels = labels[..., 1:].contiguous()
+    valid_mask = (shift_labels != -100).unsqueeze(-1)
+    
     ce_loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+    
+    kd_loss = torch.tensor(0.0, device=student_model.device)
+    if cached_targets is not None:
+        # Consume precomputed teacher targets
+        c_probs = cached_targets["probs"].to(student_model.device)
+        c_indices = cached_targets["indices"].to(student_model.device)
+        c_mask = cached_targets["mask"].to(student_model.device)
+        
+        # Flatten student valid logits
+        student_valid = shift_logits[c_mask]
+        if student_valid.size(0) > 0:
+            student_valid_scaled = student_valid / temperature
+            student_log_probs = F.log_softmax(student_valid_scaled.float(), dim=-1)
+            
+            # Reconstruct sparse teacher probs
+            teacher_probs = torch.zeros_like(student_log_probs)
+            teacher_probs.scatter_(1, c_indices, c_probs.float())
+            
+            kd_loss = F.kl_div(student_log_probs, teacher_probs, reduction="batchmean") * (temperature ** 2)
+    elif teacher_model is not None:
+        with torch.no_grad():
+            teacher_outputs = teacher_model(**inputs)
+            teacher_logits = teacher_outputs.logits
+            
+        scaled_student = student_logits / temperature
+        scaled_teacher = teacher_logits / temperature
+        
+        student_log_probs = F.log_softmax(scaled_student.float(), dim=-1)
+        teacher_probs = F.softmax(scaled_teacher.float(), dim=-1)
+        
+        raw_kd_loss = F.kl_div(student_log_probs, teacher_probs, reduction="none")
+        if valid_mask.sum() > 0:
+            kd_loss = (raw_kd_loss * valid_mask).sum() / valid_mask.sum()
+            kd_loss = kd_loss * (temperature ** 2)
     
     # Extract router metrics
     student_aux_loss = 0.0
@@ -155,19 +186,6 @@ def train_step(batch, teacher_model, student_model, optimizer, accumulation_step
     for k in routing_stats:
         routing_stats[k] /= num_layers
     
-    # KD Loss with masking (P0-5)
-    scaled_student = student_logits / temperature
-    scaled_teacher = teacher_logits / temperature
-    
-    valid_mask = (labels != -100).unsqueeze(-1)
-    
-    student_log_probs = F.log_softmax(scaled_student.float(), dim=-1)
-    teacher_probs = F.softmax(scaled_teacher.float(), dim=-1)
-    
-    kd_loss = F.kl_div(student_log_probs, teacher_probs, reduction="none")
-    kd_loss = (kd_loss * valid_mask).sum() / (valid_mask.sum() + 1e-6)
-    kd_loss = kd_loss * (temperature ** 2)
-    
     total_loss = ce_loss + kd_loss + (student_aux_loss * 0.01)
     total_loss = total_loss / accumulation_steps
     total_loss.backward()
@@ -178,7 +196,7 @@ def main():
     print("Initializing P0 Validated MoE Training Pipeline...")
     model_id = "Qwen/Qwen2-VL-2B-Instruct"
     
-    teacher, student = setup_models(model_id)
+    teacher, student = setup_models(model_id, load_teacher=True)
     processor = AutoProcessor.from_pretrained(model_id)
     
     dataset = LazyMultimodalDataset(processor, json_path="train.json", base_image_dir="./drive_mount/")
@@ -207,7 +225,6 @@ def main():
         step_time = time.time() - start_time
         peak_vram = torch.cuda.max_memory_allocated() / (1024**2) if torch.cuda.is_available() else 0
         
-        # Telemetry (P0-9)
         print(f"Step {step+1} | Loss: {total_loss:.4f} (CE: {ce_loss:.4f}, KD: {kd_loss:.4f})")
         print(f"  -> Time: {step_time:.2f}s | Peak VRAM: {peak_vram:.1f}MB")
         print(f"  -> Routing: Entropy={stats.get('routing_entropy',0):.3f}, DropRate={stats.get('drop_rate',0):.3f}, Top1Conf={stats.get('top1_confidence',0):.3f}")
