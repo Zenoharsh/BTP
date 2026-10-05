@@ -106,11 +106,27 @@ def collate_fn(batch, processor):
 def train_step(batch, teacher_model, student_model, optimizer, accumulation_steps, temperature=2.0):
     inputs = {k: v.to(student_model.device) for k, v in batch.items()}
     
-    # Generate labels (P0-4, P0-5)
+    # Generate labels (P0-4, P0-5: Strict Answer-Token Masking)
     labels = inputs["input_ids"].clone()
-    pad_token_id = 151643 # Qwen2 pad
-    labels[labels == pad_token_id] = -100
     
+    im_start_id = 151644
+    assistant_id = 77091
+    im_end_id = 151645
+    
+    # Mask EVERYTHING by default
+    labels[:] = -100
+    
+    for i in range(labels.size(0)):
+        seq = inputs["input_ids"][i]
+        start_indices = (seq == im_start_id).nonzero(as_tuple=True)[0]
+        for start_idx in start_indices:
+            if start_idx + 1 < len(seq) and seq[start_idx + 1] == assistant_id:
+                end_idx_candidates = (seq[start_idx:] == im_end_id).nonzero(as_tuple=True)[0]
+                if len(end_idx_candidates) > 0:
+                    end_idx = start_idx + end_idx_candidates[0]
+                    # Unmask ONLY the actual assistant tokens (after <|im_start|> assistant \n)
+                    labels[i, start_idx+3 : end_idx+1] = seq[start_idx+3 : end_idx+1]
+                    
     with torch.no_grad():
         teacher_outputs = teacher_model(**inputs)
         teacher_logits = teacher_outputs.logits
