@@ -125,8 +125,9 @@ def train_step(batch, student_model, optimizer, accumulation_steps, temperature=
             logsumexp = torch.logsumexp(student_valid_scaled, dim=-1, keepdim=True)
             student_topk_log_probs = student_topk_logits - logsumexp
             
-            # Top-K teacher distillation
-            kd_loss = (c_probs * (torch.log(c_probs.clamp(min=1e-8)) - student_topk_log_probs)).sum(dim=-1).mean()
+            # Top-K teacher distillation with renormalized probabilities
+            c_probs_norm = c_probs / c_probs.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+            kd_loss = (c_probs_norm * (torch.log(c_probs_norm.clamp(min=1e-8)) - student_topk_log_probs)).sum(dim=-1).mean()
             kd_loss = kd_loss * (temperature ** 2)
             
     # Extract router metrics

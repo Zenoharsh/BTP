@@ -73,9 +73,11 @@ def test_smoke():
     print("D) Answer mask strictly isolated ground truth tokens (excluding im_end).")
     
     # E) Gradient Isolation
-    # Reset router weights so all experts receive tokens, undoing Test C skew
+    # Explicitly construct a balanced routing to guarantee all experts receive tokens
     with torch.no_grad():
-        moe_mlp.router.gate.weight.normal_(0, 0.1)
+        moe_mlp.router.gate.weight.zero_()
+        for i in range(4):
+            moe_mlp.router.gate.weight[i, i] = 100.0
         
     for name, param in moe_mlp.named_parameters():
         if "router.gate" in name or ".experts." in name:
@@ -84,9 +86,12 @@ def test_smoke():
             param.requires_grad = False
             
     moe_mlp.train()
-    # Use a larger sequence to guarantee all experts receive tokens
-    large_input = torch.randn(1, 1024, hidden_size, dtype=torch.bfloat16)
-    out = moe_mlp(large_input)
+    # Construct a deterministic input that perfectly balances across the 4 experts
+    balanced_input = torch.zeros(1, 1024, hidden_size, dtype=torch.bfloat16)
+    for i in range(1024):
+        balanced_input[0, i, i % 4] = 1.0
+        
+    out = moe_mlp(balanced_input)
     loss = out.sum()
     loss.backward()
     
