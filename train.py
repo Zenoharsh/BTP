@@ -146,14 +146,15 @@ def train_step(batch, teacher_model, student_model, optimizer, accumulation_step
         # Flatten student valid logits
         student_valid = shift_logits[c_mask]
         if student_valid.size(0) > 0:
+            # Sparse KD: We only evaluate KL divergence over the Top-K indices to avoid full-vocab materialization
             student_valid_scaled = student_valid / temperature
-            student_log_probs = F.log_softmax(student_valid_scaled.float(), dim=-1)
+            student_log_probs_full = F.log_softmax(student_valid_scaled.float(), dim=-1)
+            student_topk_log_probs = student_log_probs_full.gather(dim=1, index=c_indices)
             
-            # Reconstruct sparse teacher probs
-            teacher_probs = torch.zeros_like(student_log_probs)
-            teacher_probs.scatter_(1, c_indices, c_probs.float())
-            
-            kd_loss = F.kl_div(student_log_probs, teacher_probs, reduction="batchmean") * (temperature ** 2)
+            # KL(p || q) = sum p * (log(p) - log(q))
+            # teacher_probs is c_probs
+            kd_loss = (c_probs * (torch.log(c_probs.clamp(min=1e-8)) - student_topk_log_probs)).sum(dim=-1).mean()
+            kd_loss = kd_loss * (temperature ** 2)
     elif teacher_model is not None:
         with torch.no_grad():
             teacher_outputs = teacher_model(**inputs)

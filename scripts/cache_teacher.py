@@ -33,10 +33,6 @@ def cache_teacher_targets(model_id="Qwen/Qwen2-VL-2B-Instruct", data_path="train
     
     print(f"Starting teacher inference over {len(dataloader)} batches...")
     for step, batch in enumerate(dataloader):
-        # We only cache a few steps for the smoke test demonstration
-        if step >= 5:
-            break
-            
         inputs = {k: v.to(teacher.device) for k, v in batch.items()}
         seq = inputs["input_ids"][0]
         valid_mask = torch.zeros_like(seq, dtype=torch.bool)

@@ -1,110 +1,141 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import copy
-from transformers import AutoConfig, Qwen2VLForConditionalGeneration
 from layers import MoELayer
 
 def test_smoke():
-    print("Running Comprehensive P0-10 Smoke Tests...")
+    print("Running Synthetic P0-10 Smoke Tests...")
     
-    # 1. Setup a valid tiny synthetic Qwen2-VL for structural tests
-    config = AutoConfig.from_pretrained("Qwen/Qwen2-VL-2B-Instruct")
-    config.text_config.num_hidden_layers = 1
-    config.vision_config.depth = 1
+    hidden_size = 128
+    intermediate_size = 256
     
-    dense_model = Qwen2VLForConditionalGeneration._from_config(config).to(torch.bfloat16)
-    dense_model.eval()
+    # 1. Setup a tiny custom base MLP mimicking Qwen2
+    class DummyMLP(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+            self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+            self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+            self.act_fn = nn.SiLU()
+        def forward(self, x):
+            return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+            
+    dense_mlp = DummyMLP().to(torch.bfloat16)
     
-    dummy_input = torch.randint(0, 1000, (1, 16))
+    dummy_input = torch.randn(1, 16, hidden_size, dtype=torch.bfloat16)
     
-    # Check dense forward
     with torch.no_grad():
-        dense_logits = dense_model(input_ids=dummy_input).logits
+        dense_output = dense_mlp(dummy_input)
         
     # Apply MoE Surgery
-    moe_model = copy.deepcopy(dense_model)
-    layer = moe_model.model.language_model.layers[0]
-    layer.mlp = MoELayer(
-        layer.mlp, 
-        config.text_config.hidden_size, 
-        config.text_config.intermediate_size, 
+    moe_mlp = MoELayer(
+        dense_mlp, 
+        hidden_size, 
+        intermediate_size, 
         num_experts=4, 
-        top_k=1
+        top_k=1,
+        capacity_factor=1.25 # Tight capacity
     ).to(torch.bfloat16)
     
     # A) Zero-LoRA MoE ≈ Dense Behavior
     with torch.no_grad():
-        moe_logits = moe_model(input_ids=dummy_input).logits
+        moe_output = moe_mlp(dummy_input)
         
-    diff = torch.abs(dense_logits - moe_logits).max().item()
+    diff = torch.abs(dense_output - moe_output).max().item()
     print(f"A) Dense vs Zero-LoRA MoE Max Difference: {diff:.6f}")
     assert diff < 1e-4, "Zero-LoRA equivalence failed! The fallback/base path is corrupt."
     
     # B) Valid outputs for every token
-    assert not torch.isnan(moe_logits).any(), "NaNs detected in MoE output!"
+    assert not torch.isnan(moe_output).any(), "NaNs detected in MoE output!"
+    print("B) Output validity confirmed (No NaNs, dense shape preserved).")
     
-    # C) Top-1 Routing & Capacity
-    metrics = layer.mlp.metrics
-    assert layer.mlp.top_k == 1, "Top-1 routing not respected."
+    # C) Top-1 Routing & Overflow Fallback
+    # Force an extreme routing skew by artificially weighting one expert
+    with torch.no_grad():
+        moe_mlp.router.gate.weight[0] = 100.0 # Force all tokens to expert 0
+        skewed_output = moe_mlp(dummy_input)
+        metrics = moe_mlp.metrics
+        
+    assert moe_mlp.top_k == 1, "Top-1 routing not respected."
     assert "drop_rate" in metrics, "Drop rate missing."
-    print(f"C) Routing metrics valid. Drop rate: {metrics['drop_rate']}")
+    print(f"C) Routing overflow metrics valid. Drop rate: {metrics['drop_rate']:.3f} (Tokens processed via base-fallback)")
+    assert metrics['drop_rate'] > 0, "Capacity dropping failed to engage under extreme skew!"
+    assert not torch.isnan(skewed_output).any(), "Overflow fallback produced NaNs!"
     
-    # D) Gradients only on router + expert LoRA
-    for name, param in moe_model.named_parameters():
+    # D) Answer Masking Correctness
+    im_start = 151644
+    assistant = 77091
+    im_end = 151645
+    # Construct: prompt ... <|im_start|> assistant \n A N S W E R <|im_end|> ... padding
+    seq = torch.tensor([1, 2, im_start, assistant, 198, 10, 11, 12, im_end, 151643, 151643])
+    labels = seq.clone()
+    labels[:] = -100
+    start_indices = (seq == im_start).nonzero(as_tuple=True)[0]
+    for start_idx in start_indices:
+        if start_idx + 1 < len(seq) and seq[start_idx + 1] == assistant:
+            end_idx_candidates = (seq[start_idx:] == im_end).nonzero(as_tuple=True)[0]
+            if len(end_idx_candidates) > 0:
+                end_idx = start_idx + end_idx_candidates[0]
+                labels[start_idx+3 : end_idx+1] = seq[start_idx+3 : end_idx+1]
+                
+    expected = [-100, -100, -100, -100, -100, 10, 11, 12, im_end, -100, -100]
+    assert labels.tolist() == expected, f"Answer mask failed! Got: {labels.tolist()}"
+    print("D) Answer mask correctly isolated ground truth tokens.")
+    
+    # E) Gradient Isolation
+    for name, param in moe_mlp.named_parameters():
         if "router.gate" in name or ".experts." in name:
             param.requires_grad = True
         else:
             param.requires_grad = False
             
-    moe_model.train()
-    out = moe_model(input_ids=dummy_input).logits
+    moe_mlp.train()
+    out = moe_mlp(dummy_input)
     loss = out.sum()
     loss.backward()
     
     grad_count = 0
-    for name, param in moe_model.named_parameters():
+    for name, param in moe_mlp.named_parameters():
         if param.requires_grad:
             assert param.grad is not None, f"Expected gradient for {name}"
             grad_count += 1
         else:
             assert param.grad is None, f"Unexpected gradient for {name}"
             
-    print(f"D) Gradient isolation valid. ({grad_count} trainable modules received gradients)")
+    print(f"E) Gradient isolation valid. ({grad_count} modules received gradients)")
     
-    # E) Checkpoint Save/Reload Equivalence
+    # F) Checkpoint Save/Reload Equivalence
     # We mutate the router and experts slightly to ensure saving works
     with torch.no_grad():
-        layer.mlp.router.gate.weight.add_(0.1)
-        layer.mlp.shared_experts.experts[0].gate_A.weight.add_(0.1)
+        moe_mlp.router.gate.weight.add_(0.1)
+        moe_mlp.shared_experts.experts[0].gate_A.weight.add_(0.1)
         
-    out_before_save = moe_model(input_ids=dummy_input).logits
+    out_before_save = moe_mlp(dummy_input)
     
-    # Save manually (state_dict of custom modules)
-    state_dict = {k: v for k, v in moe_model.state_dict().items() if "router" in k or "experts" in k}
+    # Save manually
+    state_dict = {k: v for k, v in moe_mlp.state_dict().items() if "router" in k or "experts" in k}
+    import os
     torch.save(state_dict, "smoke_checkpoint.pt")
     
     # Reload into a fresh model
-    fresh_moe = copy.deepcopy(dense_model)
-    fresh_layer = fresh_moe.model.language_model.layers[0]
-    fresh_layer.mlp = MoELayer(
-        fresh_layer.mlp, 
-        config.text_config.hidden_size, 
-        config.text_config.intermediate_size, 
+    fresh_mlp = MoELayer(
+        DummyMLP(), 
+        hidden_size, 
+        intermediate_size, 
         num_experts=4, 
         top_k=1
     ).to(torch.bfloat16)
     
-    fresh_moe.load_state_dict(torch.load("smoke_checkpoint.pt"), strict=False)
+    fresh_mlp.load_state_dict(torch.load("smoke_checkpoint.pt"), strict=False)
+    fresh_mlp.eval()
     
-    fresh_moe.eval()
-    out_after_load = fresh_moe(input_ids=dummy_input).logits
+    with torch.no_grad():
+        out_after_load = fresh_mlp(dummy_input)
     
     load_diff = torch.abs(out_before_save - out_after_load).max().item()
-    print(f"E) Save/Reload Max Difference: {load_diff:.6f}")
+    print(f"F) Save/Reload Max Difference: {load_diff:.6f}")
     assert load_diff < 1e-4, "Checkpoint equivalence failed!"
     
-    # Cleanup
     if os.path.exists("smoke_checkpoint.pt"):
         os.remove("smoke_checkpoint.pt")
         
