@@ -4,14 +4,16 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 from train import LazyMultimodalDataset, collate_fn
+from utils import get_answer_labels
 
 def cache_teacher_targets(model_id="Qwen/Qwen2-VL-2B-Instruct", data_path="train.json", cache_dir="teacher_cache"):
     """
     P0-8: Precomputes and caches teacher KD targets for answer tokens only.
-    This avoids running the teacher during the MoE student training loop.
+    Iterates the ENTIRE dataset and saves targets keyed by sample_id to perfectly 
+    align with the shuffled dataloader in train.py.
     """
     os.makedirs(cache_dir, exist_ok=True)
-    print("Initializing Teacher Model for caching...")
+    print("Initializing Teacher Model for full dataset caching...")
     
     try:
         teacher = Qwen2VLForConditionalGeneration.from_pretrained(
@@ -26,27 +28,21 @@ def cache_teacher_targets(model_id="Qwen/Qwen2-VL-2B-Instruct", data_path="train
     dataset = LazyMultimodalDataset(processor, json_path=data_path, base_image_dir="./drive_mount/")
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=lambda b: collate_fn(b, processor))
     
-    im_start_id = 151644
-    assistant_id = 77091
-    im_end_id = 151645
     temperature = 2.0
     
-    print(f"Starting teacher inference over {len(dataloader)} batches...")
+    print(f"Starting teacher inference over {len(dataloader)} samples...")
     for step, batch in enumerate(dataloader):
-        inputs = {k: v.to(teacher.device) for k, v in batch.items()}
-        seq = inputs["input_ids"][0]
-        valid_mask = torch.zeros_like(seq, dtype=torch.bool)
+        sample_ids = batch.pop("sample_ids")
+        sample_id = sample_ids[0]
         
-        start_indices = (seq == im_start_id).nonzero(as_tuple=True)[0]
-        for start_idx in start_indices:
-            if start_idx + 1 < len(seq) and seq[start_idx + 1] == assistant_id:
-                end_idx_candidates = (seq[start_idx:] == im_end_id).nonzero(as_tuple=True)[0]
-                if len(end_idx_candidates) > 0:
-                    end_idx = start_idx + end_idx_candidates[0]
-                    valid_mask[start_idx+3 : end_idx+1] = True
-                    
+        inputs = {k: v.to(teacher.device) for k, v in batch.items()}
+        
+        # Centralized answer masking
+        labels = get_answer_labels(inputs["input_ids"])
+        valid_mask = (labels != -100)[0]
+        
         if not valid_mask.any():
-            print(f"Step {step}: No answer tokens found. Skipping.")
+            print(f"Sample {sample_id}: No answer tokens found. Skipping.")
             continue
             
         with torch.no_grad():
@@ -61,18 +57,18 @@ def cache_teacher_targets(model_id="Qwen/Qwen2-VL-2B-Instruct", data_path="train
         if valid_logits.size(0) == 0:
             continue
             
-        # Compute and extract Top-K probabilities to save disk space
+        # Compute Top-K probabilities
         probs = F.softmax(valid_logits / temperature, dim=-1)
         topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
         
-        cache_file = os.path.join(cache_dir, f"batch_{step}.pt")
+        cache_file = os.path.join(cache_dir, f"{sample_id}.pt")
         torch.save({
             "probs": topk_probs.cpu(),
             "indices": topk_indices.cpu(),
             "mask": shift_mask.cpu()
         }, cache_file)
         
-        print(f"Cached step {step} -> {cache_file} (Masked tokens: {valid_logits.size(0)})")
+        print(f"Cached {sample_id} -> {cache_file} (Masked tokens: {valid_logits.size(0)})")
         
     print("Teacher caching complete.")
 

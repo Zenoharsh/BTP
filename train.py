@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig
 from layers import MoELayer
+from utils import get_answer_labels
 import json
 import os
 from PIL import Image
@@ -12,17 +13,7 @@ def get_mlp_layers(model):
     """P0-6: Consistent layer traversal helper"""
     return model.model.language_model.layers
 
-def setup_models(model_id="Qwen/Qwen2-VL-2B-Instruct", load_teacher=True):
-    teacher = None
-    if load_teacher:
-        print("Loading Teacher Model...")
-        teacher = Qwen2VLForConditionalGeneration.from_pretrained(
-            model_id, torch_dtype=torch.bfloat16, device_map={"": 0}
-        )
-        teacher.eval()
-        for param in teacher.parameters():
-            param.requires_grad = False
-
+def setup_student(model_id="Qwen/Qwen2-VL-2B-Instruct"):
     print("Loading Student Model in 4-bit...")
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -65,7 +56,7 @@ def setup_models(model_id="Qwen/Qwen2-VL-2B-Instruct", load_teacher=True):
             print(f"  {name} ({param.numel()})")
     print(f"Total trainable params: {trainable_params:,d} || all params: {all_param:,d} || trainable%: {100 * trainable_params / all_param:.4f}")
     
-    return teacher, student
+    return student
 
 class LazyMultimodalDataset(Dataset):
     def __init__(self, processor, json_path="train.json", base_image_dir="./drive_mount/"):
@@ -95,82 +86,49 @@ class LazyMultimodalDataset(Dataset):
         ]
         
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-        return {"text": text, "image": image}
+        return {"text": text, "image": image, "sample_id": f"sample_{idx}"}
 
 def collate_fn(batch, processor):
     texts = [item["text"] for item in batch]
     images = [item["image"] for item in batch]
+    sample_ids = [item["sample_id"] for item in batch]
     inputs = processor(text=texts, images=images, padding=True, return_tensors="pt")
+    inputs["sample_ids"] = sample_ids
     return inputs
 
-def train_step(batch, teacher_model, student_model, optimizer, accumulation_steps, temperature=2.0, cached_targets=None):
+def train_step(batch, student_model, optimizer, accumulation_steps, temperature=2.0, cached_targets=None):
     inputs = {k: v.to(student_model.device) for k, v in batch.items()}
     
-    # Generate labels (P0-4, P0-5: Strict Answer-Token Masking)
-    labels = inputs["input_ids"].clone()
+    labels = get_answer_labels(inputs["input_ids"]).to(student_model.device)
     
-    im_start_id = 151644
-    assistant_id = 77091
-    im_end_id = 151645
-    
-    # Mask EVERYTHING by default
-    labels[:] = -100
-    
-    for i in range(labels.size(0)):
-        seq = inputs["input_ids"][i]
-        start_indices = (seq == im_start_id).nonzero(as_tuple=True)[0]
-        for start_idx in start_indices:
-            if start_idx + 1 < len(seq) and seq[start_idx + 1] == assistant_id:
-                end_idx_candidates = (seq[start_idx:] == im_end_id).nonzero(as_tuple=True)[0]
-                if len(end_idx_candidates) > 0:
-                    end_idx = start_idx + end_idx_candidates[0]
-                    # Unmask ONLY the actual assistant tokens (after <|im_start|> assistant \n)
-                    labels[i, start_idx+3 : end_idx+1] = seq[start_idx+3 : end_idx+1]
-                    
     student_outputs = student_model(**inputs)
     student_logits = student_outputs.logits
     
     shift_logits = student_logits[..., :-1, :].contiguous()
     shift_labels = labels[..., 1:].contiguous()
-    valid_mask = (shift_labels != -100).unsqueeze(-1)
     
     ce_loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
     
     kd_loss = torch.tensor(0.0, device=student_model.device)
     if cached_targets is not None:
-        # Consume precomputed teacher targets
         c_probs = cached_targets["probs"].to(student_model.device)
         c_indices = cached_targets["indices"].to(student_model.device)
         c_mask = cached_targets["mask"].to(student_model.device)
         
-        # Flatten student valid logits
-        student_valid = shift_logits[c_mask]
+        student_valid = shift_logits[0][c_mask]
         if student_valid.size(0) > 0:
-            # Sparse KD: We only evaluate KL divergence over the Top-K indices to avoid full-vocab materialization
             student_valid_scaled = student_valid / temperature
-            student_log_probs_full = F.log_softmax(student_valid_scaled.float(), dim=-1)
-            student_topk_log_probs = student_log_probs_full.gather(dim=1, index=c_indices)
             
-            # KL(p || q) = sum p * (log(p) - log(q))
-            # teacher_probs is c_probs
+            # P0: True Memory-Efficient Sparse KD
+            # Compute selected student log-probabilities as: logit_topk/T - logsumexp(all_student_logits/T)
+            student_topk_logits = student_valid_scaled.gather(dim=1, index=c_indices)
+            logsumexp = torch.logsumexp(student_valid_scaled, dim=-1, keepdim=True)
+            student_topk_log_probs = student_topk_logits - logsumexp
+            
+            # Top-K teacher distillation
             kd_loss = (c_probs * (torch.log(c_probs.clamp(min=1e-8)) - student_topk_log_probs)).sum(dim=-1).mean()
             kd_loss = kd_loss * (temperature ** 2)
-    elif teacher_model is not None:
-        with torch.no_grad():
-            teacher_outputs = teacher_model(**inputs)
-            teacher_logits = teacher_outputs.logits
             
-        scaled_student = student_logits / temperature
-        scaled_teacher = teacher_logits / temperature
-        
-        student_log_probs = F.log_softmax(scaled_student.float(), dim=-1)
-        teacher_probs = F.softmax(scaled_teacher.float(), dim=-1)
-        
-        raw_kd_loss = F.kl_div(student_log_probs, teacher_probs, reduction="none")
-        if valid_mask.sum() > 0:
-            kd_loss = (raw_kd_loss * valid_mask).sum() / valid_mask.sum()
-            kd_loss = kd_loss * (temperature ** 2)
-    
     # Extract router metrics
     student_aux_loss = 0.0
     layers = get_mlp_layers(student_model)
@@ -194,20 +152,20 @@ def train_step(batch, teacher_model, student_model, optimizer, accumulation_step
     return total_loss.item() * accumulation_steps, ce_loss.item(), kd_loss.item(), routing_stats
 
 def main():
-    print("Initializing P0 Validated MoE Training Pipeline...")
+    print("Initializing Validated Cached MoE Training Pipeline...")
     model_id = "Qwen/Qwen2-VL-2B-Instruct"
     
-    teacher, student = setup_models(model_id, load_teacher=True)
+    # P0: Teacher is explicitly NOT loaded in the student training path
+    student = setup_student(model_id)
     processor = AutoProcessor.from_pretrained(model_id)
     
     dataset = LazyMultimodalDataset(processor, json_path="train.json", base_image_dir="./drive_mount/")
     dataloader = DataLoader(dataset, batch_size=1, shuffle=True, collate_fn=lambda b: collate_fn(b, processor))
     
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, student.parameters()), lr=2e-4)
-    
     accumulation_steps = 16
-    print("Running Smoke Test (Max 10 steps)...")
     
+    print("Running Training Loop (Cache Integration Mode)...")
     student.train()
     optimizer.zero_grad()
     
@@ -217,7 +175,18 @@ def main():
             
         start_time = time.time()
         
-        total_loss, ce_loss, kd_loss, stats = train_step(batch, teacher, student, optimizer, accumulation_steps)
+        sample_ids = batch.pop("sample_ids")
+        sample_id = sample_ids[0]
+        
+        # Load cached teacher targets matching the exact sample ID
+        cached_targets = None
+        cache_file = os.path.join("teacher_cache", f"{sample_id}.pt")
+        if os.path.exists(cache_file):
+            cached_targets = torch.load(cache_file, weights_only=False)
+        else:
+            print(f"Warning: Missing teacher cache for {sample_id}. Run scripts/cache_teacher.py first.")
+            
+        total_loss, ce_loss, kd_loss, stats = train_step(batch, student, optimizer, accumulation_steps, cached_targets=cached_targets)
         
         if (step + 1) % accumulation_steps == 0 or (step + 1) == len(dataloader) or step == 9:
             optimizer.step()
@@ -226,11 +195,11 @@ def main():
         step_time = time.time() - start_time
         peak_vram = torch.cuda.max_memory_allocated() / (1024**2) if torch.cuda.is_available() else 0
         
-        print(f"Step {step+1} | Loss: {total_loss:.4f} (CE: {ce_loss:.4f}, KD: {kd_loss:.4f})")
+        print(f"Step {step+1} [{sample_id}] | Loss: {total_loss:.4f} (CE: {ce_loss:.4f}, Sparse KD: {kd_loss:.4f})")
         print(f"  -> Time: {step_time:.2f}s | Peak VRAM: {peak_vram:.1f}MB")
-        print(f"  -> Routing: Entropy={stats.get('routing_entropy',0):.3f}, DropRate={stats.get('drop_rate',0):.3f}, Top1Conf={stats.get('top1_confidence',0):.3f}")
+        print(f"  -> Routing: Entropy={stats.get('routing_entropy',0):.3f}, DropRate={stats.get('drop_rate',0):.3f}")
 
-    print("\nSmoke Test Complete. Stopping before long training.")
+    print("\nTraining Pipeline Test Complete.")
 
 if __name__ == "__main__":
     main()
