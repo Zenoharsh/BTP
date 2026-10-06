@@ -1,0 +1,31 @@
+model_id: Qwen/Qwen2-VL-2B-Instruct
+data:
+  dir: data/v3
+  min_pixels: 50176
+  max_pixels: 401408
+moe:
+  num_experts: 4
+  rank: 16
+  alpha: 32
+  top_k: 1
+  capacity_factor: null
+  route_tokens: all
+  lb_coef: 0.01
+  z_coef: 0.001
+loss:
+  ce: 1.0
+  kd: 1.0
+  kd_temperature: 2.0
+train:
+  epochs: 2
+  batch_size: 1
+  grad_accum: 8
+  lr: 2.0e-4
+  router_lr: 1.0e-3
+  weight_decay: 0.0
+  warmup_ratio: 0.05
+  scheduler: cosine
+  max_grad_norm: 1.0
+  log_every: 1
+  eval_every_epoch: true
+  gradient_checkpointing: true

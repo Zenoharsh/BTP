@@ -1,0 +1,5 @@
+data:
+  limit: 32
+train:
+  epochs: 25
+  grad_accum: 4
