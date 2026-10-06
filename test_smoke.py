@@ -172,6 +172,21 @@ def test_smoke():
     except Exception as e:
         print(f"G) Cache Integration Failed: {e}")
         raise e
+        
+    # H) Device Placement Inheritance Test
+    dense_mlp_meta = DummyMLP().to("meta")
+    moe_mlp_meta = MoELayer(
+        dense_mlp_meta, 
+        hidden_size, 
+        intermediate_size, 
+        num_experts=4, 
+        top_k=1,
+        capacity_factor=1.25
+    ).to(device=dense_mlp_meta.gate_proj.weight.device)
+    
+    assert moe_mlp_meta.router.gate.weight.device.type == "meta", "Router gate did not inherit device!"
+    assert moe_mlp_meta.shared_experts.experts[0].gate_A.weight.device.type == "meta", "Expert did not inherit device!"
+    print("H) Device placement inheritance successfully verified.")
 
     print("\n[SUCCESS] All structural smoke tests passed. Ready for execution.")
 

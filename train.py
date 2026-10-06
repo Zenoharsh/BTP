@@ -34,8 +34,20 @@ def setup_student(model_id="Qwen/Qwen2-VL-2B-Instruct"):
     layers = get_mlp_layers(student)
     for i, layer in enumerate(layers):
         original_mlp = layer.mlp
+        
+        # Robustly identify the device of the original MLP to support device_map="auto"
+        target_device = original_mlp.down_proj.weight.device
+        
         moe_layer = MoELayer(original_mlp, hidden_size, intermediate_size, num_experts=4, top_k=1)
-        layer.mlp = moe_layer.to(torch.bfloat16)
+        layer.mlp = moe_layer.to(dtype=torch.bfloat16, device=target_device)
+        
+        if i == 0:
+            print("--- Layer 0 Setup Diagnostic ---")
+            print(f"  Original MLP Device : {target_device}")
+            print(f"  Router Gate Device  : {layer.mlp.router.gate.weight.device}")
+            print(f"  Shared Base Device  : {layer.mlp.shared_experts.base_mlp.down_proj.weight.device}")
+            print(f"  Expert 0 LoRA Device: {layer.mlp.shared_experts.experts[0].gate_A.weight.device}")
+            print("--------------------------------")
 
     print("Unfreezing Routers and Custom Expert LoRA...")
     trainable_params = 0
