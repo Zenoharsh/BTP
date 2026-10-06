@@ -49,12 +49,14 @@ class TopKRouter(nn.Module):
             metrics["load_cv"] = (load_std / load_mean).item() if load_mean > 0 else 0.0
             
             metrics["expert_counts"] = token_to_expert_mask.sum(dim=0).detach().cpu().tolist()
+            metrics["mean_routing_prob"] = router_prob_per_expert.detach().cpu().tolist()
             metrics["top1_confidence"] = routing_weights.max(dim=-1)[0].mean().item()
         else:
             metrics["aux_loss"] = 0.0
             metrics["routing_entropy"] = 0.0
             metrics["load_cv"] = 0.0
             metrics["expert_counts"] = []
+            metrics["mean_routing_prob"] = []
             metrics["top1_confidence"] = 0.0
             
         if len(original_shape) > 2:

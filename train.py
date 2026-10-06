@@ -151,12 +151,22 @@ def train_step(batch, student_model, optimizer, accumulation_steps, temperature=
             metrics = layer.mlp.metrics
             student_aux_loss += metrics.get("aux_loss", 0.0)
             for k, v in metrics.items():
-                if k not in ["aux_loss", "expert_counts"]:
+                if k == "aux_loss":
+                    continue
+                if isinstance(v, list) and len(v) > 0:
+                    if k not in routing_stats:
+                        routing_stats[k] = [0.0] * len(v)
+                    for idx in range(len(v)):
+                        routing_stats[k][idx] += v[idx]
+                elif not isinstance(v, list):
                     routing_stats[k] = routing_stats.get(k, 0.0) + v
 
     num_layers = len(layers)
     for k in routing_stats:
-        routing_stats[k] /= num_layers
+        if isinstance(routing_stats[k], list):
+            routing_stats[k] = [val / num_layers for val in routing_stats[k]]
+        else:
+            routing_stats[k] /= num_layers
     
     total_loss = ce_loss + kd_loss + (student_aux_loss * 0.01)
     total_loss = total_loss / accumulation_steps
@@ -211,6 +221,12 @@ def main():
         print(f"Step {step+1} [{sample_id}] | Loss: {total_loss:.4f} (CE: {ce_loss:.4f}, Sparse KD: {kd_loss:.4f})")
         print(f"  -> Time: {step_time:.2f}s | Peak VRAM: {peak_vram:.1f}MB")
         print(f"  -> Routing: Entropy={stats.get('routing_entropy',0):.3f}, DropRate={stats.get('drop_rate',0):.3f}")
+        
+        # Format lists
+        exp_counts = stats.get('expert_counts', [])
+        mean_probs = stats.get('mean_routing_prob', [])
+        print(f"  -> Expert counts: [{', '.join([f'{c:.1f}' for c in exp_counts])}]")
+        print(f"  -> mean routing probability: [{', '.join([f'{p:.4f}' for p in mean_probs])}]")
 
     print("\nTraining Pipeline Test Complete.")
 
