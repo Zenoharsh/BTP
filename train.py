@@ -167,6 +167,22 @@ def train_step(batch, student_model, optimizer, accumulation_steps, temperature=
             routing_stats[k] = [val / num_layers for val in routing_stats[k]]
         else:
             routing_stats[k] /= num_layers
+            
+    # Add explicit Layer 0 diagnostic for Step 1 telemetry tracking
+    if not hasattr(student_model, "_printed_routing_telemetry") and len(layers) > 0:
+        l0_metrics = layers[0].mlp.metrics
+        num_tokens = sum(l0_metrics["expert_counts"])
+        capacity = int(math.ceil((num_tokens / layers[0].mlp.num_experts) * layers[0].mlp.capacity_factor))
+        print(f"\n--- Step 1 Layer 0 Routing Math Verification ---")
+        print(f"Raw token count before dispatch: {int(num_tokens)}")
+        print(f"Per-expert assignment counts before capacity: {l0_metrics['expert_counts']}")
+        print(f"Per-expert capacity: {capacity}")
+        print(f"Reported drop_rate: {l0_metrics['drop_rate']:.4f}")
+        print(f"Expected dropped assignments: {int(l0_metrics['drop_rate'] * num_tokens)}")
+        print(f"Fallback token count: {int(l0_metrics['drop_rate'] * num_tokens)}")
+        print(f"Final expert counts in telemetry: {l0_metrics['expert_counts']}")
+        print(f"------------------------------------------------\n")
+        student_model._printed_routing_telemetry = True
     
     total_loss = ce_loss + kd_loss + (student_aux_loss * 0.01)
     total_loss = total_loss / accumulation_steps

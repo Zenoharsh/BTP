@@ -188,6 +188,45 @@ def test_smoke():
     assert moe_mlp_meta.shared_experts.experts[0].gate_A.weight.device.type == "meta", "Expert did not inherit device!"
     print("H) Device placement inheritance successfully verified.")
 
+    # I) Routing Drop Rate and Capacity Verification
+    print("I) Routing Drop Rate and Capacity Verification")
+    import math
+    T = 100
+    C = int(math.ceil((T / 4) * 1.25)) # 32
+    
+    # 1. Perfectly balanced (25 per expert)
+    moe_mlp.train()
+    with torch.no_grad():
+        moe_mlp.router.gate.weight.zero_()
+        for i in range(4):
+            moe_mlp.router.gate.weight[i, i] = 100.0
+            
+    balanced_input = torch.zeros(1, 100, hidden_size, dtype=torch.bfloat16)
+    for i in range(100):
+        balanced_input[0, i, i % 4] = 1.0
+        
+    moe_mlp(balanced_input)
+    metrics = moe_mlp.metrics
+    assert metrics["drop_rate"] == 0.0, f"Expected 0.0 drop rate, got {metrics['drop_rate']}"
+    assert metrics["expert_counts"] == [25.0, 25.0, 25.0, 25.0], "Expected 25 tokens per expert"
+    print("   - Balanced assignment (below capacity) confirmed 0 drop_rate.")
+    
+    # 2. Known overflow (100 to expert 0)
+    with torch.no_grad():
+        moe_mlp.router.gate.weight.zero_()
+        moe_mlp.router.gate.weight[0, 0] = 100.0
+        
+    overflow_input = torch.zeros(1, 100, hidden_size, dtype=torch.bfloat16)
+    for i in range(100):
+        overflow_input[0, i, 0] = 1.0
+        
+    moe_mlp(overflow_input)
+    metrics = moe_mlp.metrics
+    expected_drop_rate = (100 - C) / 100.0
+    assert abs(metrics["drop_rate"] - expected_drop_rate) < 1e-4, f"Expected drop_rate {expected_drop_rate}, got {metrics['drop_rate']}"
+    assert metrics["expert_counts"] == [100.0, 0.0, 0.0, 0.0], "Expected 100 tokens to expert 0"
+    print(f"   - Concentrated assignment confirmed drop_rate {expected_drop_rate:.4f}.")
+
     print("\n[SUCCESS] All structural smoke tests passed. Ready for execution.")
 
 if __name__ == "__main__":
