@@ -9,3 +9,4 @@ python-pptx
 torchvision
 qwen-vl-utils
 pytest
+pyyaml
