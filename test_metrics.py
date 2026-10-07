@@ -36,3 +36,21 @@ def test_boolean_acc():
     assert boolean_acc_score("yes", ["False"]) == 0.0
     assert boolean_acc_score("potato", ["True"]) == 0.0
     assert boolean_acc_score("True", ["potato"]) == 0.0
+
+def test_anls_extra():
+    assert anls_score("", ["abc"]) == 0.0                       # empty pred
+    assert anls_score("  Hello   World ", ["hello world"]) == 1.0  # normalisation
+    assert anls_score("apple", ["xyz", "apply"]) == 0.8          # max over answers
+    assert anls_score("abcd", ["abce"]) == 0.75                  # just above threshold
+
+def test_trailing_punctuation():
+    assert boolean_acc_score("True.", ["True"]) == 1.0
+    assert relaxed_acc_score("12.", ["12"]) == 1.0
+    assert relaxed_acc_score("12.5", ["12.5"]) == 1.0
+
+def test_exact_match_and_dispatch():
+    from metrics import compute_metric
+    assert exact_match(" Red ", ["red"]) == 1.0
+    assert compute_metric("document_ocr", "apple", ["apply"]) == 0.8
+    assert compute_metric("chart_qa", "100", ["104"]) == 1.0
+    assert compute_metric("spatial_reasoning", "no", ["False"]) == 1.0

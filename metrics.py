@@ -30,7 +30,7 @@ def anls_score(pred, answers, threshold=0.5):
     
     max_score = 0.0
     for ans in answers:
-        ans = normalize_text(ans)
+        ans = normalize_text(str(ans))
         dist = levenshtein(pred, ans)
         max_len = max(len(pred), len(ans))
         if max_len == 0:
@@ -42,8 +42,13 @@ def anls_score(pred, answers, threshold=0.5):
             max_score = max(max_score, score)
     return max_score
 
+def _clean_short(x):
+    """lowercase, strip whitespace, surrounding quotes and a trailing period ("True." -> "true")."""
+    x = str(x).strip().lower().strip('"\'').strip()
+    return x[:-1].strip() if x.endswith(".") else x
+
 def relaxed_acc_score(pred, answers):
-    pred = str(pred).strip().lower()
+    pred = _clean_short(pred)
     
     def parse_num(x):
         x = x.replace("%", "").replace(",", "").strip()
@@ -55,7 +60,7 @@ def relaxed_acc_score(pred, answers):
     pred_num = parse_num(pred)
     
     for ans in answers:
-        ans = str(ans).strip().lower()
+        ans = _clean_short(ans)
         if pred == ans:
             return 1.0
             
@@ -70,7 +75,7 @@ def relaxed_acc_score(pred, answers):
     return 0.0
 
 def boolean_acc_score(pred, answers):
-    pred = str(pred).strip().lower()
+    pred = _clean_short(pred)
     # Map pred
     if pred in ["true", "yes"]:
         p_val = "true"
@@ -95,7 +100,7 @@ def boolean_acc_score(pred, answers):
 def exact_match(pred, answers):
     pred = normalize_text(pred)
     for ans in answers:
-        if pred == normalize_text(ans):
+        if pred == normalize_text(str(ans)):
             return 1.0
     return 0.0
 
