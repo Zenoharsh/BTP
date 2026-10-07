@@ -237,7 +237,7 @@ def merge():
         print(f"  {split}: {dict(task_counts)}", flush=True)
         
     try:
-        with open("train.json", "r") as f:
+        with open("data/smoke_raw/train.json", "r") as f:
             old_train = json.load(f)
         with open("data/smoke.jsonl", "w") as f:
             for i, item in enumerate(old_train):
