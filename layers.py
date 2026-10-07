@@ -90,6 +90,7 @@ class MoELayer(nn.Module):
         self.record = False           # if True, keep per-token expert ids for MI analysis
         self.aux_loss = None          # differentiable LB + z loss of the last forward
         self.metrics = {}             # detached telemetry of the last forward (A8)
+        self.telemetry = True         # False: skip aux loss + metrics in eval (no GPU syncs per token)
         self.last_expert_ids = None
 
     # ------------------------------------------------------------------ gates
@@ -120,6 +121,13 @@ class MoELayer(nn.Module):
             cap = None
 
         g = sel * probs * (E / k)                                          # A1
+        if not (self.training or self.telemetry):
+            self.aux_loss, self.metrics = None, {}
+            if self.record:
+                ids = top_idx[:, 0].clone()
+                ids[~routable] = -1
+                self.last_expert_ids = ids.cpu()
+            return g
         # ---- auxiliary losses on routable tokens only, per layer
         if routable.any():
             p_r, s_r = probs[routable], (sel[routable] > 0).float()
@@ -172,6 +180,12 @@ class MoELayer(nn.Module):
         if self.training:
             with torch.no_grad():
                 self.usage_ema.mul_(self.ema_decay).add_((1 - self.ema_decay) * sel.mean(0) / k)
+        g = g_seq.repeat_interleave(S, dim=0)                              # [N, E]
+        if self.route_tokens == "text":
+            g = g * (~self._image_mask(n, x.device)).unsqueeze(-1)
+        if not (self.training or self.telemetry):
+            self.aux_loss, self.metrics = None, {}
+            return g
         P = probs.mean(0)
         lb = E * torch.sum(self.usage_ema.detach() * P)
         z = torch.logsumexp(logits, -1).pow(2).mean()
@@ -186,9 +200,6 @@ class MoELayer(nn.Module):
                             "entropy_of_mean": float(-(P * P.clamp_min(1e-9).log()).sum()),
                             "mean_prob": P.tolist(), "top1_conf": float(probs.max(-1).values.mean()),
                             "load_cv": float(u.std() / u.mean().clamp_min(1e-9))}
-        g = g_seq.repeat_interleave(S, dim=0)                              # [N, E]
-        if self.route_tokens == "text":
-            g = g * (~self._image_mask(n, x.device)).unsqueeze(-1)
         return g
 
     def _gates(self, x, B=None, S=None):
@@ -238,6 +249,16 @@ def get_lm_layers(model):
 
 def moe_layers(model):
     return [l.mlp for l in get_lm_layers(model) if isinstance(l.mlp, MoELayer)]
+
+
+def set_telemetry(model, on):
+    """Turn routing telemetry (aux loss + metrics, several GPU syncs per layer) on/off for eval-mode
+    forwards. Training always computes them. Returns the previous setting."""
+    layers = moe_layers(model)
+    prev = layers[0].telemetry if layers else True
+    for l in layers:
+        l.telemetry = on
+    return prev
 
 
 def prompt_mask_from_ids(ids, im_start_id):

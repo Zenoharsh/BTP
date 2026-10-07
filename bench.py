@@ -31,6 +31,7 @@ import numpy as np
 import torch
 
 from evaluate import encode_prompt, load_samples, stop_token_ids
+from layers import set_telemetry
 from metrics import compute_metric
 
 TASKS = ("chart_qa", "document_ocr", "spatial_reasoning")
@@ -93,6 +94,7 @@ def load_variant(args, cfg, variant):
         apply_moe_surgery(model, cfg, token_ids["image_pad"], token_ids["im_start"])
         load_adapters(model, args.adapters)
         model.eval()
+        set_telemetry(model, False)             # no routing telemetry/GPU syncs while timing
     return model, processor, token_ids
 
 

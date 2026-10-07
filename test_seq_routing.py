@@ -13,7 +13,7 @@ import torch
 from config import load
 from convert import apply_profile, merge_into_base, routing_stats
 from evaluate import evaluate
-from layers import moe_layers, prompt_mask_from_ids
+from layers import moe_layers, prompt_mask_from_ids, set_telemetry
 from model import apply_moe_surgery
 from train import micro_batch_loss, train
 
@@ -157,6 +157,25 @@ def test_profile_export_still_exact():
     ref = fwd(model, full)
     merge_into_base(model)
     assert torch.allclose(fwd(model, full), ref, atol=1e-4)
+
+
+def test_telemetry_off_same_outputs_no_metrics():
+    """Eval with telemetry off: identical logits/generation, no aux/metrics; training unaffected."""
+    for config in ("configs/moe.yaml", "configs/moe_seq.yaml"):
+        cfg, model, _, _, tid, full, prompt = tiny(trained=True)
+        if config == "configs/moe.yaml":
+            for l in moe_layers(model):
+                l.route_level = "token"
+        model.eval()
+        ref = fwd(model, full)
+        assert all(l.metrics for l in moe_layers(model))
+        assert set_telemetry(model, False) is True
+        assert torch.equal(fwd(model, full), ref)
+        assert all(l.metrics == {} and l.aux_loss is None for l in moe_layers(model))
+        model.train()
+        model(**full, use_cache=False)
+        assert all(l.metrics and l.aux_loss is not None for l in moe_layers(model))
+        set_telemetry(model, True)
 
 
 if __name__ == "__main__":

@@ -137,8 +137,10 @@ def evaluate(model, processor, samples, root, token_ids, out_path=None, max_new_
     """Greedy batch-1 evaluation. Returns {"per_task": {...}, "macro": float, "macro_em": float, ...}.
     Writes preds.jsonl (uid, task, pred, answers, score, em, latency, img_tokens) if out_path is given,
     and the routing .npz if routing_path is given."""
+    from layers import set_telemetry
     was_training = model.training
     model.eval()
+    prev_telemetry = set_telemetry(model, False)     # no routing telemetry/GPU syncs while timing
     device = next(model.parameters()).device
     eos = stop_token_ids(processor, token_ids)
     # use_cache=True explicitly: build_model sets config.use_cache=False for training
@@ -178,6 +180,7 @@ def evaluate(model, processor, samples, root, token_ids, out_path=None, max_new_
         if rec is not None:
             rec.remove()
         model.train(was_training)
+        set_telemetry(model, prev_telemetry)
 
     if out_path:
         os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
