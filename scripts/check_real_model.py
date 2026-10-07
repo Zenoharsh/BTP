@@ -1,19 +1,28 @@
+import sys
+import os
+sys.path.insert(0, os.path.abspath('.'))
+
 import torch
 from transformers import AutoProcessor
-from config import load_config
+from config import load
 from data import VQADataset
 from model import build_model
 from utils import get_answer_labels
 
 def main():
-    cfg = load_config("configs/base.yaml")
+    if not torch.cuda.is_available():
+        print("CRITICAL: CUDA is not available. 4-bit quantized model loading requires a GPU.")
+        print("Please run this script on your Kaggle instance or a machine with CUDA.")
+        return
+
+    cfg = load("configs/base.yaml")
     print(f"Loaded config for {cfg.model_id}")
     
     print("Loading processor...")
     processor = AutoProcessor.from_pretrained(cfg.model_id)
     
     print("Building model (this may take a bit)...")
-    model, token_ids = build_model(cfg, processor)
+    model, token_ids = build_model(cfg, processor, device_index=0)
     
     print("Loading one sample from smoke.jsonl...")
     dataset = VQADataset("data/smoke.jsonl", processor, limit=1)
@@ -43,20 +52,18 @@ def main():
     unmasked = (labels != -100).sum().item()
     print(f"Unmasked answer tokens: {unmasked}")
     
-    # Let's decode the unmasked tokens to verify it exactly matches the answer
     unmasked_ids = inputs.input_ids[labels != -100]
     print(f"Decoded answer tokens: {processor.tokenizer.decode(unmasked_ids)}")
     
     assert unmasked > 0, "No answer tokens were unmasked! get_answer_labels is broken."
     
     print("\nRunning forward pass...")
-    with torch.amp.autocast("cuda", dtype=torch.float16):
-        outputs = model(
-            input_ids=inputs.input_ids,
-            image_grid_thw=inputs.image_grid_thw,
-            pixel_values=inputs.pixel_values,
-            labels=labels
-        )
+    outputs = model(
+        input_ids=inputs.input_ids,
+        image_grid_thw=inputs.image_grid_thw,
+        pixel_values=inputs.pixel_values,
+        labels=labels
+    )
     
     print(f"Logits shape: {outputs.logits.shape}")
     print(f"Loss: {outputs.loss.item():.4f}")
