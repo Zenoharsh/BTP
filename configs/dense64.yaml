@@ -1,0 +1,4 @@
+moe:
+  num_experts: 1
+  rank: 64
+  alpha: 128
