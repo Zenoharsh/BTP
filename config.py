@@ -10,6 +10,8 @@ class DataConfig:
     min_pixels: int = 50176
     max_pixels: int = 401408
     limit: Optional[int] = None
+    teacher_cache: str = "teacher_cache/v3"
+    dev_limit: Optional[int] = None     # first N dev samples PER TASK for per-epoch eval
 
 @dataclass
 class MoEConfig:
@@ -41,6 +43,8 @@ class TrainConfig:
     max_grad_norm: float = 1.0
     log_every: int = 1
     eval_every_epoch: bool = True
+    eval_every: int = 1                 # evaluate on dev every N epochs (and always after the last)
+    num_workers: int = 2
     gradient_checkpointing: bool = True
 
 @dataclass
