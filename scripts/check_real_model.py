@@ -156,7 +156,7 @@ def main():
     for r, (task, _, _) in zip(ref, batches):
         check(f"reference logits finite [{task}]", torch.isfinite(r).all())
 
-    apply_moe_surgery(model, cfg, token_ids["image_pad"])
+    apply_moe_surgery(model, cfg, token_ids["image_pad"], token_ids["im_start"])
     print(f"MoE layers: {len(moe_layers(model))}")
     for r, (task, full, _) in zip(ref, batches):
         new = logits_of(model, full)

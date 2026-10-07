@@ -86,6 +86,15 @@ class RoutingRecorder:
                 return
             _, probs, top_idx = out
             m = self.text_mask.to(probs.device)
+            if getattr(layer, "route_level", "token") == "sequence":
+                if probs.shape[0] != 1:
+                    raise ValueError("routing recording supports batch size 1 only")
+                n_text = int(m.sum())                     # one decision for the whole sample, weighted
+                e = int(top_idx[0, 0])                    # by its number of text tokens
+                g = float(probs[0, e]) * (self.E / layer.top_k)
+                self._cur[0][i, e] += n_text
+                self._cur[1][i, e] += g * n_text
+                return
             if m.numel() != probs.shape[0]:
                 return
             e = top_idx[m, 0]
@@ -217,7 +226,7 @@ def load_for_eval(cfg, max_pixels, base=False, adapters=None, device_index=0):
         cfg.model_id, quantization_config=bnb, torch_dtype=torch.float16, device_map={"": device_index})
     token_ids = resolve_token_ids(processor)
     if not base:
-        apply_moe_surgery(model, cfg, token_ids["image_pad"])
+        apply_moe_surgery(model, cfg, token_ids["image_pad"], token_ids["im_start"])
         load_adapters(model, adapters)
     return model, processor, token_ids
 

@@ -23,6 +23,7 @@ class MoEConfig:
     route_tokens: str = "all"
     lb_coef: float = 0.01
     z_coef: float = 0.001
+    route_level: str = "token"          # "token" | "sequence" (one expert per sample, from the prompt)
 
 @dataclass
 class LossConfig:

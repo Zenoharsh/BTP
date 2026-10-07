@@ -146,7 +146,8 @@ def export(cfg, adapters, out_dir, configure_fn):
     processor = AutoProcessor.from_pretrained(cfg.model_id, min_pixels=cfg.data.min_pixels,
                                               max_pixels=cfg.data.max_pixels)
     model = Qwen2VLForConditionalGeneration.from_pretrained(cfg.model_id, torch_dtype=torch.float16)
-    apply_moe_surgery(model, cfg, resolve_token_ids(processor)["image_pad"])
+    tid = resolve_token_ids(processor)
+    apply_moe_surgery(model, cfg, tid["image_pad"], tid["im_start"])
     load_adapters(model, adapters)
     configure_fn(model)
     merge_into_base(model)

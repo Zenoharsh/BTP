@@ -43,7 +43,7 @@ def resolve_token_ids(processor):
     return ids
 
 
-def apply_moe_surgery(model, cfg, image_token_id):
+def apply_moe_surgery(model, cfg, image_token_id, im_start_id=None):
     """Replace every language-model MLP with MoELayer. Works on any model exposing
     model.model.(language_model.)layers[i].mlp with gate/up/down_proj."""
     tc = model.config.text_config if hasattr(model.config, "text_config") else model.config
@@ -54,17 +54,19 @@ def apply_moe_surgery(model, cfg, image_token_id):
         new = MoELayer(base, tc.hidden_size, tc.intermediate_size,
                        num_experts=m.num_experts, rank=m.rank, alpha=m.alpha, top_k=m.top_k,
                        capacity_factor=m.capacity_factor, route_tokens=m.route_tokens,
-                       lb_coef=m.lb_coef, z_coef=m.z_coef)
+                       lb_coef=m.lb_coef, z_coef=m.z_coef,
+                       route_level=getattr(m, "route_level", "token"))
         # move ONLY the new float32 modules; the (possibly 4-bit) base is untouched
         for sub in (new.lora_gate, new.lora_up, new.lora_down, new.router):
             if sub is not None:
                 sub.to(dev)
+        new.usage_ema = new.usage_ema.to(dev)
         layer.mlp = new
 
     for n, p in model.named_parameters():
         p.requires_grad = is_trainable_name(n)
 
-    install_token_type_hook(model, image_token_id)
+    install_token_type_hook(model, image_token_id, im_start_id)
     return model
 
 
@@ -87,7 +89,7 @@ def build_model(cfg, processor, device_index=0):
         cfg.model_id, quantization_config=bnb, torch_dtype=torch.float16,
         device_map={"": device_index})
     token_ids = resolve_token_ids(processor)
-    apply_moe_surgery(model, cfg, token_ids["image_pad"])
+    apply_moe_surgery(model, cfg, token_ids["image_pad"], token_ids["im_start"])
 
     if cfg.train.gradient_checkpointing:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
