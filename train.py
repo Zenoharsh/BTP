@@ -9,67 +9,7 @@ import os
 from PIL import Image
 import time
 
-def get_mlp_layers(model):
-    """P0-6: Consistent layer traversal helper"""
-    return model.model.language_model.layers
-
-def setup_student(model_id="Qwen/Qwen2-VL-2B-Instruct"):
-    print("Loading Student Model in 4-bit...")
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=True
-    )
-    student = Qwen2VLForConditionalGeneration.from_pretrained(
-        model_id, quantization_config=bnb_config, device_map={"": 0}
-    )
-    
-    student.gradient_checkpointing_enable()
-
-    print("Performing Architecture Surgery (Sparse Upcycling)...")
-    hidden_size = student.config.text_config.hidden_size
-    intermediate_size = student.config.text_config.intermediate_size
-    
-    layers = get_mlp_layers(student)
-    for i, layer in enumerate(layers):
-        original_mlp = layer.mlp
-        
-        # Robustly identify the device of the original MLP to support device_map="auto"
-        target_device = original_mlp.down_proj.weight.device
-        
-        moe_layer = MoELayer(original_mlp, hidden_size, intermediate_size, num_experts=4, top_k=1)
-        layer.mlp = moe_layer.to(dtype=torch.bfloat16, device=target_device)
-        
-        if i == 0:
-            print("--- Layer 0 Setup Diagnostic ---")
-            print(f"  Original MLP Device : {target_device}")
-            print(f"  Router Gate Device  : {layer.mlp.router.gate.weight.device}")
-            print(f"  Shared Base Device  : {layer.mlp.shared_experts.base_mlp.down_proj.weight.device}")
-            print(f"  Expert 0 LoRA Device: {layer.mlp.shared_experts.experts[0].gate_A.weight.device}")
-            print("--------------------------------")
-
-    print("Unfreezing Routers and Custom Expert LoRA...")
-    trainable_params = 0
-    all_param = 0
-    for name, param in student.named_parameters():
-        all_param += param.numel()
-        if "router.gate" in name or ".experts." in name:
-            param.requires_grad = True
-            if "router.gate" in name:
-                param.data = param.data.to(torch.float32)
-            trainable_params += param.numel()
-        else:
-            param.requires_grad = False
-
-    print("Trainable parameters:")
-    for name, param in student.named_parameters():
-        if param.requires_grad:
-            print(f"  {name} ({param.numel()})")
-    print(f"Total trainable params: {trainable_params:,d} || all params: {all_param:,d} || trainable%: {100 * trainable_params / all_param:.4f}")
-    
-    return student
-
+from model import build_model
 class LazyMultimodalDataset(Dataset):
     def __init__(self, processor, json_path="train.json", base_image_dir="./drive_mount/"):
         self.processor = processor
