@@ -195,6 +195,10 @@ def merge():
                     item = json.loads(line)
                     h = item.pop("hash")
                     
+                    # Strip data/v3/ from image path so it's relative to data/v3/
+                    if item["image"].startswith("data/v3/"):
+                        item["image"] = item["image"][8:]
+                    
                     if h in all_hashes:
                         print(f"CRITICAL OVERLAP DETECTED FOR HASH {h}")
                         assert False, f"Image {h} appears in multiple splits or tasks!"
@@ -241,10 +245,15 @@ def merge():
             old_train = json.load(f)
         with open("data/smoke.jsonl", "w") as f:
             for i, item in enumerate(old_train):
+                old_img = item.get("image", "")
+                if old_img.startswith("images/"):
+                    new_img = "smoke_raw/" + old_img
+                else:
+                    new_img = old_img
                 smoke_item = {
                     "uid": f"smoke_{i:03d}",
                     "task": "spatial_reasoning",
-                    "image": item.get("image", ""),
+                    "image": new_img,
                     "question": item.get("question", ""),
                     "answers": [item.get("answer", "")]
                 }

@@ -7,6 +7,7 @@ class VQADataset(Dataset):
     def __init__(self, jsonl_path, processor, limit=None):
         self.processor = processor
         self.data = []
+        self.jsonl_path = jsonl_path
         with open(jsonl_path, 'r') as f:
             for line in f:
                 self.data.append(json.loads(line))
@@ -42,10 +43,9 @@ class VQADataset(Dataset):
         
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
         
-        try:
-            image = Image.open(image_path).convert("RGB")
-        except:
-            image = Image.new("RGB", (224, 224))
+        import os
+        full_image_path = os.path.join(os.path.dirname(self.jsonl_path), image_path)
+        image = Image.open(full_image_path).convert("RGB")
             
         return {
             "text": text,

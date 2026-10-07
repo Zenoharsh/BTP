@@ -2,7 +2,8 @@
 venv/
 env/
 .venv/
-
+#data
+data/
 # Python Cache
 __pycache__/
 *.py[cod]
@@ -19,6 +20,9 @@ qwen2vl_sparse_moe_checkpoint/
 
 # Dataset and Mounts
 drive_mount/
+data/
+runs/
+teacher_cache/
 *.json
 
 # Generated Images and Plots
@@ -26,3 +30,6 @@ drive_mount/
 *.jpg
 *.jpeg
 Fig*.png
+
+*.zip
+check_data_output.txt
