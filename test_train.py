@@ -59,18 +59,18 @@ def test_sparse_kd_full_support_equals_kl():
 
 
 def test_cache_entry_and_identity_kd():
-    """Teacher = unmodified model; student = same model after surgery (identity at init).
-    With k = full vocab, KD ~ 0. (With k < V the floor is -log(topk_mass) * T^2, see next test.)"""
+    """Teacher = unmodified model; student = same model after surgery (identity at init) -> KD ~ 0,
+    even with k < V (tail bucket, no renormalisation)."""
     cfg, model, tid, samples = tiny()
     teacher = copy.deepcopy(model).eval()
     with tempfile.TemporaryDirectory() as d:
-        build_cache(teacher, samples, tid, d, k=128)
+        build_cache(teacher, samples, tid, d, k=20)
         c = torch.load(cache_path(d, "s0"))
         L = samples[0]["input_ids"].shape[1]
         assert c["seq_len"] == L and c["mask"].numel() == L - 1
-        assert c["probs"].shape == (int(c["mask"].sum()), 128) and c["indices"].dtype == torch.int32
+        assert c["probs"].shape == (int(c["mask"].sum()), 20) and c["indices"].dtype == torch.int32
         assert c["mask"].sum() == 3                                 # 2 answer tokens + <|im_end|>
-        assert ((c["topk_mass"] > 0) & (c["topk_mass"] <= 1.0001)).all()
+        assert ((c["topk_mass"] > 0) & (c["topk_mass"] < 1)).all()  # truncated support
         apply_moe_surgery(model, cfg, tid["image_pad"])
         model.eval()
         cache = TeacherCache(d, [s["uids"][0] for s in samples])
@@ -78,14 +78,23 @@ def test_cache_entry_and_identity_kd():
         assert parts["kd"] < 2e-3, parts                           # fp16 cache rounding only
 
 
-def test_topk_floor_equals_minus_log_mass():
-    """Documented property of sparse KD on a truncated support: for an identical student the loss is
-    mean(-log topk_mass) * T^2, so topk_mass close to 1 is required (reported by the cache check)."""
+def test_topk_plus_tail_is_exact_coarsened_kl():
+    """With k < V the loss equals the exact KL between the (k + 1)-bucket coarsenings of teacher and
+    student, is ~0 for an identical student, and gives ~0 gradient there."""
     torch.manual_seed(0)
-    T, logits = 2.0, torch.randn(4, 128)
-    p = F.softmax(logits / T, -1).topk(20, -1)
-    floor = (-p.values.sum(-1).log()).mean() * T * T
-    assert torch.allclose(sparse_kd(logits, p.indices, p.values, T), floor, atol=1e-5)
+    T, t_logits, s_logits = 2.0, torch.randn(4, 128) * 3, torch.randn(4, 128) * 3
+    tp = F.softmax(t_logits / T, -1)
+    top = tp.topk(20, -1)
+    sp = F.softmax(s_logits / T, -1)
+    def coarse(p):
+        k = p.gather(-1, top.indices)
+        return torch.cat([k, 1 - k.sum(-1, keepdim=True)], -1)
+    ref = (coarse(tp) * (coarse(tp).log() - coarse(sp).log())).sum(-1).mean() * T * T
+    assert torch.allclose(sparse_kd(s_logits, top.indices, top.values, T), ref, atol=1e-4)
+    x = t_logits.clone().requires_grad_(True)
+    loss = sparse_kd(x, top.indices, top.values, T)
+    loss.backward()
+    assert loss.abs() < 1e-5 and x.grad.abs().max() < 1e-5
 
 
 def test_length_mismatch_is_caught():

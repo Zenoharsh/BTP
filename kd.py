@@ -35,11 +35,20 @@ def teacher_targets(logits_1d, shift_mask, temperature=2.0, k=50):
 
 
 def sparse_kd(student_logits, indices, probs, temperature=2.0):
-    """KL(teacher_topk_renormalised || student) on the teacher's top-k support, T^2 scaled.
+    """Exact KL(teacher || student) on the teacher's top-k tokens PLUS one "tail" bucket holding all
+    other tokens, T^2 scaled. The teacher is NOT renormalised over its top-k: at T=2 the top-50 of a
+    150k vocabulary often hold well under half the mass, and renormalising would bias the target.
+    Identical student -> 0 for any k; k = V -> the full KL.
     student_logits: [n, V] (any dtype; cast to fp32 here), indices: [n, k], probs: [n, k]."""
     s = student_logits.float() / temperature
-    s_logp = s.gather(-1, indices.long()) - torch.logsumexp(s, dim=-1, keepdim=True)
+    idx = indices.long()
+    lse = torch.logsumexp(s, dim=-1, keepdim=True)
+    s_logp = s.gather(-1, idx) - lse                                    # [n, k]
+    s_log_tail = torch.logsumexp(s.scatter(-1, idx, float("-inf")), dim=-1) - lse.squeeze(-1)  # [n]
     t = probs.float()
-    t = t / t.sum(-1, keepdim=True).clamp_min(1e-8)
-    kl = (t * (t.clamp_min(1e-8).log() - s_logp)).sum(-1).mean()
-    return kl * temperature ** 2
+    t_tail = (1.0 - t.sum(-1)).clamp_min(0.0)
+    kl_k = (torch.xlogy(t, t) - t * s_logp).sum(-1)
+    finite = torch.isfinite(s_log_tail)                                 # k = V: the tail is empty
+    kl_tail = torch.where(finite, torch.xlogy(t_tail, t_tail) - t_tail * s_log_tail.clamp_min(-1e4),
+                          torch.zeros_like(t_tail))
+    return (kl_k + kl_tail).mean() * temperature ** 2
