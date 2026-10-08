@@ -218,7 +218,8 @@ def print_summary(res):
 
 
 # --------------------------------------------------------------------------- CLI
-def load_for_eval(cfg, max_pixels, base=False, adapters=None, device_index=0):
+def load_for_eval(cfg, max_pixels, base=False, adapters=None, device_index=0, fp16=False):
+    """4-bit NF4 base (the deployment format) unless fp16=True (unquantized reference model)."""
     from transformers import AutoProcessor, BitsAndBytesConfig, Qwen2VLForConditionalGeneration
     from model import apply_moe_surgery, load_adapters, resolve_token_ids
     min_pixels = min(cfg.data.min_pixels, max_pixels)
@@ -226,7 +227,8 @@ def load_for_eval(cfg, max_pixels, base=False, adapters=None, device_index=0):
     bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                              bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.float16)
     model = Qwen2VLForConditionalGeneration.from_pretrained(
-        cfg.model_id, quantization_config=bnb, torch_dtype=torch.float16, device_map={"": device_index})
+        cfg.model_id, quantization_config=None if fp16 else bnb, torch_dtype=torch.float16,
+        device_map={"": device_index})
     token_ids = resolve_token_ids(processor)
     if not base:
         apply_moe_surgery(model, cfg, token_ids["image_pad"], token_ids["im_start"])
@@ -245,6 +247,7 @@ def main():
     ap.add_argument("--adapters", default=None, help="folder with adapters.pt (required unless --base)")
     ap.add_argument("--record_routing", action="store_true")
     ap.add_argument("--max_new_tokens", type=int, default=32)
+    ap.add_argument("--fp16", action="store_true", help="unquantized fp16 base instead of 4-bit NF4")
     args = ap.parse_args()
 
     if args.base == bool(args.adapters):
@@ -260,13 +263,19 @@ def main():
     routing = os.path.join(os.path.dirname(os.path.abspath(out)), f"routing_{split_name}.npz") \
         if args.record_routing else None
 
-    model, processor, token_ids = load_for_eval(cfg, max_pixels, args.base, args.adapters)
+    model, processor, token_ids = load_for_eval(cfg, max_pixels, args.base, args.adapters, fp16=args.fp16)
+    weights_mib = model.get_memory_footprint() / 2 ** 20
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
     samples = load_samples(args.split, args.limit)
     print(f"{len(samples)} samples | max_pixels={max_pixels} | {'BASE' if args.base else args.adapters}")
     res = evaluate(model, processor, samples, os.path.dirname(os.path.abspath(args.split)), token_ids,
                    out_path=out, max_new_tokens=args.max_new_tokens, routing_path=routing)
     print_summary(res)
-    res.update({"split": args.split, "max_pixels": max_pixels, "base": args.base,
+    peak = torch.cuda.max_memory_allocated() / 2 ** 20 if torch.cuda.is_available() else None
+    print(f"weights {weights_mib:.0f} MiB | peak VRAM {peak or 0:.0f} MiB | {'fp16' if args.fp16 else 'nf4'}")
+    res.update({"weights_mib": weights_mib, "peak_vram_mib": peak, "precision": "fp16" if args.fp16 else "nf4",
+                "split": args.split, "max_pixels": max_pixels, "base": args.base,
                 "adapters": args.adapters, "config": args.config})
     with open(os.path.splitext(out)[0] + "_summary.json", "w") as f:
         json.dump(res, f, indent=2)
