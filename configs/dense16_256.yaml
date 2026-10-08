@@ -1,0 +1,6 @@
+moe:
+  num_experts: 1
+  rank: 16
+data:
+  max_pixels: 200704
+  teacher_cache: teacher_cache/v3_256

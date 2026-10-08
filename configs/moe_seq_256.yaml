@@ -1,0 +1,5 @@
+moe:
+  route_level: sequence
+data:
+  max_pixels: 200704
+  teacher_cache: teacher_cache/v3_256
