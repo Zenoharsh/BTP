@@ -1,0 +1,237 @@
+% Draft for IEEE ICORT 2027 (IEEEtran conference). Numbers marked \tbd{} come from
+% scripts/run_efficiency.sh and are filled in once that run finishes.
+\documentclass[conference]{IEEEtran}
+\usepackage{amsmath,amssymb,booktabs,graphicx,xcolor,multirow}
+\usepackage[hidelinks]{hyperref}
+\newcommand{\tbd}[1]{\textcolor{red}{[#1]}}
+
+\begin{document}
+
+\title{Train as Experts, Deploy as Dense: Sequence-Level Mixture-of-LoRA Adaptation of a 4-bit Vision-Language Model for Edge Devices}
+
+\author{\IEEEauthorblockN{\tbd{Author names}}
+\IEEEauthorblockA{\tbd{Department, Institute}\\ \tbd{email}}}
+
+\maketitle
+
+\begin{abstract}
+Vision-language models (VLMs) are attractive for on-device document, chart and scene understanding, but
+their memory footprint and the cost of adapting them to several tasks limit use on resource-constrained
+hardware. We adapt Qwen2-VL-2B, quantised to 4-bit NF4, to three tasks (document VQA, chart QA and
+visual spatial reasoning) with a mixture of LoRA experts (MoE-LoRA) trained on a single 16\,GB T4 GPU
+with knowledge distillation from the full-precision model. We compare token-level routing with a
+sequence-level router that makes one expert choice per request from the prompt. All adapters improve
+the 4-bit model by 6--7 points on held-out test data. Sequence-level MoE-LoRA matches a dense LoRA of
+the same rank within noise ($-0.7$ points, 95\% CI $[-1.7, +0.4]$, three seeds) while its experts become
+strongly task-aligned without task labels: the mutual information between task and expert is about
+$10\times$ that of token-level routing in every seed. Because each request uses one expert, the
+experts fold into standard per-task checkpoints with no accuracy loss. On a 4\,GB GTX~1650 laptop GPU
+the folded model runs at exactly the base model's cost (2.05\,GB peak memory, 18.8 tokens/s), whereas
+keeping the router costs 11\% more memory and 24\% slower decoding. \tbd{Efficiency sentence: accuracy
+of 4-bit + adapters at 256\,px vs the fp16 model at 512\,px, memory and image-token savings.}
+\end{abstract}
+
+\begin{IEEEkeywords}
+vision-language models, mixture of experts, LoRA, quantization, edge deployment, knowledge distillation
+\end{IEEEkeywords}
+
+\section{Introduction}
+Compact VLMs such as Qwen2-VL-2B~\cite{wang2024qwen2vl} can read documents and charts and reason about
+scenes, which makes them candidates for offline use on laptops, embedded boards and field equipment.
+Two obstacles remain. First, the full-precision model needs about 4.4\,GB for its weights alone, more
+than many edge GPUs offer. Second, one device often serves several distinct tasks, and adapting one
+model to all of them either costs accuracy or multiplies the number of models to store.
+
+Parameter-efficient fine-tuning with low-rank adapters (LoRA)~\cite{hu2022lora} on a 4-bit quantised
+base (QLoRA)~\cite{dettmers2023qlora} addresses the first obstacle during training. Mixtures of LoRA
+experts~\cite{zadouri2023molora,dou2023loramoe} address the second by giving the model several
+adapters and a router, in the spirit of sparse mixture-of-experts layers~\cite{shazeer2017moe,fedus2022switch}.
+However, routed experts add memory and latency at inference, which is exactly what an edge device cannot
+afford, and token-level routers rarely learn experts that correspond to recognisable tasks.
+
+We study whether MoE-LoRA can be trained for multi-task capacity and still be deployed at the cost of
+the base model. Our contributions are:
+\begin{itemize}
+\item A shared-base MoE-LoRA layer for the MLP blocks of a 4-bit VLM, with a \emph{sequence-level}
+router that selects one expert per request from the pooled prompt text, trained with sparse
+top-$k$ knowledge distillation from the full-precision model on a single T4 GPU.
+\item A controlled three-seed comparison against dense LoRA (rank-matched and parameter-matched) and
+token-level routing on held-out test data, with paired bootstrap tests.
+\item An analysis showing that sequence-level routing yields task-aligned experts without labels
+($\approx$0.48 vs 0.05 bits of task--expert mutual information), and that these experts fold
+losslessly into standard per-task checkpoints.
+\item Measurements on a 4\,GB consumer laptop GPU showing that folded checkpoints have zero overhead
+over the base model, including a practical finding for GPUs without tensor cores.
+\end{itemize}
+
+\section{Related Work}
+\textbf{Parameter-efficient adaptation.} LoRA~\cite{hu2022lora} learns low-rank updates to frozen
+weights; QLoRA~\cite{dettmers2023qlora} trains them on top of a 4-bit NF4 base, which we adopt.
+\textbf{Mixture of experts.} Sparsely gated MoE layers~\cite{shazeer2017moe} and Switch
+Transformers~\cite{fedus2022switch} route tokens to experts with load-balancing losses; router
+$z$-losses~\cite{zoph2022stmoe} stabilise training. Mixtures of LoRA experts apply the idea to
+adapters~\cite{zadouri2023molora,dou2023loramoe}. These works route at token level and keep the router
+at inference. We route at sequence level and fold experts away for deployment.
+\textbf{Distillation.} We use temperature-scaled knowledge distillation~\cite{hinton2015distilling} from
+the unquantised model to the 4-bit student.
+
+\section{Method}
+\subsection{Shared-base MoE-LoRA layer}
+Each MLP block of the language model, $y=W_d\,(\sigma(W_g x)\odot W_u x)$, keeps its frozen 4-bit
+weights and receives $E$ LoRA experts on each of the three projections:
+\begin{equation}
+W_p' x = W_p x + \sum_{e=1}^{E} g_e(x)\, s\, B_{p,e} A_{p,e}\, x,\quad p\in\{g,u,d\},
+\end{equation}
+with rank $r$, scale $s=\alpha/r$ and gate vector $g(x)$. The base projection is computed once and never
+scaled, so the layer is exactly the base model when all $B=0$. The $E$ adapters of a projection are
+stored stacked, and the gate is applied as a block mask on the rank dimension, so the cost equals one
+LoRA of rank $Er$ without a loop over experts. For the selected top-$k$ experts the gate is
+$g_e=(E/k)\,p_e$, where $p$ is the router's softmax output; a dense LoRA baseline is the special case $E=1$.
+
+\subsection{Token-level vs sequence-level routing}
+A token-level router computes $p$ from each token's hidden state, as in standard MoE. Our
+sequence-level router computes one decision per request: it mean-pools the layer input over the
+prompt's \emph{text} tokens (image tokens excluded), applies the router once, and uses the chosen
+expert for every token of the sequence. During generation the decision made in the prefill pass is
+reused for the decoded tokens, so the answer cannot influence the choice. Because a single decision per
+sample makes per-batch load statistics meaningless at batch size 1, the load-balancing loss
+$E\sum_e \bar u_e \bar p_e$ uses an exponential moving average $\bar u$ of expert usage (decay 0.99);
+a router $z$-loss~\cite{zoph2022stmoe} is added.
+
+\subsection{Training objective}
+The loss is $\mathcal{L}=\mathcal{L}_{CE}+\lambda_{KD}\mathcal{L}_{KD}+\lambda_{lb}\mathcal{L}_{lb}+\lambda_z\mathcal{L}_z$,
+computed on answer tokens only. The teacher is the same model in fp16 without quantisation. We cache its
+top-50 probabilities at temperature $T=2$ for every answer token. Because at $T=2$ the top-50 tokens hold
+on average only 44\% of the probability mass, we do not renormalise them; instead the remaining mass forms
+one ``tail'' bucket, and $\mathcal{L}_{KD}$ is the exact KL divergence between the $(k{+}1)$-bucket
+teacher and student distributions, scaled by $T^2$. It is zero for an identical student.
+
+\subsection{Folding experts for deployment}
+In \emph{fixed} mode the gate is a constant vector $\bar g$ and each projection's update is the dense
+matrix $\sum_e \bar g_e s B_e A_e$, which is added to the unquantised base weights and saved as a standard
+Qwen2-VL checkpoint. A \emph{task profile} uses, for each layer, the expert that the router chose most often
+for that task on the development set, with its mean gate value; a \emph{full merge} uses the expected gate
+over all development samples. With sequence-level routing a request uses exactly one expert per layer, so a
+task profile reproduces the routed computation whenever the router's choice agrees with the profile.
+
+\section{Experimental Setup}
+\textbf{Data.} 400/50/200 training/development/test samples per task from DocVQA~\cite{mathew2021docvqa}
+(document\_ocr), ChartQA~\cite{masry2022chartqa} (chart\_qa) and VSR~\cite{liu2023vsr} (spatial\_reasoning),
+1200/150/600 in total. Metrics: ANLS~\cite{biten2019stvqa} for documents, relaxed accuracy for charts and
+accuracy on True/False for VSR; we report their macro average. The development set is used for epoch
+selection only; all main results are on the test set.
+
+\textbf{Model and training.} Qwen2-VL-2B-Instruct with the language model in 4-bit NF4 (double
+quantisation, fp16 compute). Images are resized by the processor to at most 401{,}408 pixels
+(``512\,px''), chosen by a resolution sweep on the base model (dev macro 70.5/75.9/76.5 at
+256/512/768\,px). Variants: \emph{dense16} (LoRA rank 16, 14.1M parameters), \emph{dense64} (rank 64,
+56.4M, parameter-matched to the MoE), \emph{moe} (4 experts of rank 16, top-1, token-level routing, 56.6M)
+and \emph{moe\_seq} (the same with sequence-level routing). AdamW, learning rate $2\times10^{-4}$
+($10^{-3}$ for routers), cosine schedule with 5\% warm-up, batch 1 with 8-step accumulation, 2 epochs,
+gradient checkpointing; $\lambda_{KD}=1$, $\lambda_{lb}=0.01$, $\lambda_z=10^{-3}$. One run takes 64--69
+minutes on one T4. Seeds 0--2 for dense16 and moe\_seq, 0--1 for moe, 0 for dense64; repeated runs with
+the same seed reproduce identical scores. Significance: paired bootstrap over test samples (stratified by
+task, 10{,}000 resamples, per-sample scores averaged over seeds).
+
+\textbf{Hardware.} Training and accuracy evaluation: NVIDIA T4 (16\,GB). Edge measurements: HP Victus laptop,
+GTX~1650 (4\,GB, no tensor cores), Intel i5-12450H, 8\,GB RAM. Greedy decoding, batch 1.
+
+\section{Results}
+\subsection{Accuracy}
+\begin{table}[t]
+\centering
+\caption{Held-out test accuracy (\%, mean $\pm$ s.d. over seeds). $\Delta$: difference to dense16 with 95\% paired bootstrap CI.}
+\label{tab:main}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lcccccc}
+\toprule
+Model & Seeds & Chart & Doc & Spatial & Macro & $\Delta$ [95\% CI] \\
+\midrule
+Base (4-bit) & -- & 72.0 & 82.2 & 60.5 & 71.6 & $-6.8$ [$-9.7$, $-4.1$] \\
+dense16 & 3 & 73.5\scriptsize{$\pm$1.3} & 83.5\scriptsize{$\pm$0.8} & 78.2\scriptsize{$\pm$2.1} & \textbf{78.4}\scriptsize{$\pm$0.7} & -- \\
+dense64 & 1 & 76.5 & 83.0 & 75.0 & 78.2 & $-0.2$ [$-2.4$, $+2.0$] \\
+moe (token) & 2 & 74.5\scriptsize{$\pm$0.7} & 83.3\scriptsize{$\pm$1.8} & 73.2\scriptsize{$\pm$3.9} & 77.0\scriptsize{$\pm$0.9} & $-1.4$ [$-2.7$, $0.0$] \\
+moe\_seq & 3 & 73.0\scriptsize{$\pm$1.7} & 84.4\scriptsize{$\pm$0.5} & 75.8\scriptsize{$\pm$0.8} & 77.7\scriptsize{$\pm$0.9} & $-0.7$ [$-1.7$, $+0.4$] \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:main} shows that every adapter improves the 4-bit base model by 6--7 points. The
+sequence-level MoE is statistically indistinguishable from dense LoRA, while token-level routing is
+measurably worse ($-1.4$, CI upper bound 0.0). A four times larger dense adapter (dense64) brings no gain,
+so adapter capacity does not limit accuracy in this setting. On the development set the ordering of
+dense16 and moe\_seq was reversed (84.6 vs 84.8), a difference that did not survive on unseen data; we
+therefore make no claim that MoE improves accuracy.
+
+\subsection{Expert specialisation}
+\begin{table}[t]
+\centering
+\caption{Mutual information between task and chosen expert (bits; maximum $\log_2 3=1.585$), development set, mean over the 28 layers.}
+\label{tab:mi}
+\begin{tabular}{lccc}
+\toprule
+Routing & Seed 0 & Seed 1 & Seed 2 \\
+\midrule
+Token-level (moe) & 0.051 & 0.046 & -- \\
+Sequence-level (moe\_seq) & 0.526 & 0.469 & 0.436 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:mi} measures how much the router's choice reveals about the task. Token-level routing
+spreads every task over all experts. Sequence-level routing yields roughly ten times more task information
+in every seed, although no task label is ever given to the model. In the most specialised layer of seed 0,
+charts, documents and spatial questions go to three different experts in 100\%, 84\% and 94\% of cases.
+Charts and documents often share an expert in other layers, consistent with both requiring text reading.
+Which layers specialise varies between seeds, and some layers collapse to a single expert (usage entropy 0),
+which then acts as a dense LoRA.
+
+\subsection{Folding experts into standard checkpoints}
+For moe\_seq, per-task profile checkpoints score 76.9, 78.2 and 77.5 on test for seeds 0--2, against
+76.9, 78.7 and 77.6 for the routed models (mean $-0.2$). A single full merge without task information loses
+0.7 points on the development set (83.9 vs 84.6). Because each profile is a standard Qwen2-VL checkpoint,
+it needs no custom inference code.
+
+\subsection{Edge deployment}
+\begin{table}[t]
+\centering
+\caption{GTX 1650 (4\,GB) laptop GPU, 4-bit weights, fp32 compute, batch 1.}
+\label{tab:edge}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lccc}
+\toprule
+Model & Peak VRAM & Latency & Decode \\
+\midrule
+Base & 2054\,MiB & 3.09\,s & 18.8 tok/s \\
+moe\_seq, routed & 2278\,MiB & 3.25\,s & 14.2 tok/s \\
+moe\_seq, folded & 2054\,MiB & 3.08\,s & 18.8 tok/s \\
+dense16, folded & 2054\,MiB & 3.08\,s & 18.7 tok/s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:edge} shows that a folded checkpoint has exactly the memory and speed of the base model,
+while keeping the router costs 11\% more memory and 24\% slower decoding. About 2.9\,s of the 3.1\,s
+latency is the prefill pass, dominated by the vision encoder, so the number of image tokens is the main
+lever for latency. The fp16 model cannot be loaded on this GPU: its 4.4\,GB of weights exceed the 4\,GB of VRAM. On the GTX~1650,
+which has no tensor cores, fp16 matrix multiplication is about five times slower than fp32; computing in
+fp32 with 4-bit weights reduces time to first token from 12.8\,s to 3.0\,s at the same accuracy for
+0.5\,GB more memory.
+
+\subsection{Accuracy versus memory and resolution}
+\tbd{From run\_efficiency.sh: test accuracy, weights and peak memory of the fp16 model at 512\,px; 4-bit
+base at 256/512\,px; moe\_seq and dense16 trained at 256\,px (3 seeds), with paired bootstrap against the
+fp16 model. Claim to state only if supported: matching the fp16 model with $\approx$3$\times$ less weight
+memory and $\approx$45\% fewer image tokens.}
+
+\section{Conclusion}
+Sequence-level MoE-LoRA lets a 4-bit VLM be trained with several task experts on one T4 GPU and deployed
+as ordinary per-task checkpoints with no accuracy loss and no runtime overhead on a 4\,GB laptop GPU.
+It matches, but does not exceed, a dense LoRA in accuracy; its benefit is modularity and interpretable,
+label-free task specialisation at zero deployment cost. Token-level routing, by contrast, learns little
+task structure and is less accurate. Limitations: three tasks and small training sets (400 per task),
+a single 2B backbone, and task profiles that assume the task is known at deployment.
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+\end{document}
