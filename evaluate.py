@@ -219,16 +219,18 @@ def print_summary(res):
 
 # --------------------------------------------------------------------------- CLI
 def load_for_eval(cfg, max_pixels, base=False, adapters=None, device_index=0, fp16=False):
-    """4-bit NF4 base (the deployment format) unless fp16=True (unquantized reference model)."""
-    from transformers import AutoProcessor, BitsAndBytesConfig, Qwen2VLForConditionalGeneration
-    from model import apply_moe_surgery, load_adapters, resolve_token_ids
+    """4-bit NF4 base (the deployment format) unless fp16=True (unquantized reference model).
+    cfg.skip_quant keeps parts of the base ("vision", "language") in fp16."""
+    from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+    from model import apply_moe_surgery, bnb_config, load_adapters, quant_report, resolve_token_ids
     min_pixels = min(cfg.data.min_pixels, max_pixels)
     processor = AutoProcessor.from_pretrained(cfg.model_id, min_pixels=min_pixels, max_pixels=max_pixels)
-    bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
-                             bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.float16)
+    bnb = bnb_config(cfg.skip_quant)
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         cfg.model_id, quantization_config=None if fp16 else bnb, torch_dtype=torch.float16,
         device_map={"": device_index})
+    if cfg.skip_quant and not fp16:
+        print(f"skip_quant={cfg.skip_quant} -> linear layers {quant_report(model)}")
     token_ids = resolve_token_ids(processor)
     if not base:
         apply_moe_surgery(model, cfg, token_ids["image_pad"], token_ids["im_start"])
@@ -248,6 +250,8 @@ def main():
     ap.add_argument("--record_routing", action="store_true")
     ap.add_argument("--max_new_tokens", type=int, default=32)
     ap.add_argument("--fp16", action="store_true", help="unquantized fp16 base instead of 4-bit NF4")
+    ap.add_argument("--skip_quant", nargs="+", default=None, choices=["vision", "language"],
+                    help="keep these base parts fp16 (default: skip_quant from the config)")
     args = ap.parse_args()
 
     if args.base == bool(args.adapters):
@@ -257,6 +261,8 @@ def main():
 
     from config import load
     cfg = load(args.config)
+    if args.skip_quant is not None:
+        cfg.skip_quant = args.skip_quant
     max_pixels = args.max_pixels or cfg.data.max_pixels
     split_name = os.path.splitext(os.path.basename(args.split))[0]
     out = args.out or os.path.join("runs", "eval", f"{split_name}_preds.jsonl")
@@ -273,8 +279,9 @@ def main():
                    out_path=out, max_new_tokens=args.max_new_tokens, routing_path=routing)
     print_summary(res)
     peak = torch.cuda.max_memory_allocated() / 2 ** 20 if torch.cuda.is_available() else None
-    print(f"weights {weights_mib:.0f} MiB | peak VRAM {peak or 0:.0f} MiB | {'fp16' if args.fp16 else 'nf4'}")
-    res.update({"weights_mib": weights_mib, "peak_vram_mib": peak, "precision": "fp16" if args.fp16 else "nf4",
+    precision = "fp16" if args.fp16 else "nf4" + "".join(f"+fp16_{s}" for s in cfg.skip_quant)
+    print(f"weights {weights_mib:.0f} MiB | peak VRAM {peak or 0:.0f} MiB | {precision}")
+    res.update({"weights_mib": weights_mib, "peak_vram_mib": peak, "precision": precision,
                 "split": args.split, "max_pixels": max_pixels, "base": args.base,
                 "adapters": args.adapters, "config": args.config})
     with open(os.path.splitext(out)[0] + "_summary.json", "w") as f:

@@ -80,11 +80,43 @@ def trainable_report(model, total_params):
             "trainable_pct": 100.0 * n / total_params}
 
 
+# Module-name patterns for parts of the base that can be kept in fp16 (cfg.skip_quant). Both the
+# transformers 5 names (prefix match) and the older 4.x names (substring match) are listed.
+SKIP_QUANT_PATTERNS = {
+    "vision": ["model.visual", "visual"],
+    "language": ["model.language_model", "model.layers"],
+}
+
+
+def bnb_config(skip_quant=()):
+    """4-bit NF4 config; parts named in skip_quant ("vision", "language") stay fp16."""
+    from transformers import BitsAndBytesConfig
+    skip = None
+    if skip_quant:
+        unknown = set(skip_quant) - set(SKIP_QUANT_PATTERNS)
+        if unknown:
+            raise ValueError(f"skip_quant: unknown {sorted(unknown)}, choose from {sorted(SKIP_QUANT_PATTERNS)}")
+        skip = ["lm_head"] + [p for s in skip_quant for p in SKIP_QUANT_PATTERNS[s]]
+    return BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                              bnb_4bit_use_double_quant=True,
+                              bnb_4bit_compute_dtype=torch.float16, llm_int8_skip_modules=skip)
+
+
+def quant_report(model):
+    """Count 4-bit vs plain linear layers in the vision tower and the language model."""
+    out = {}
+    for name, mod in model.named_modules():
+        if not isinstance(mod, torch.nn.Linear) or ".lora_" in name or ".router" in name:
+            continue
+        part = "vision" if "visual" in name else "lm_head" if "lm_head" in name else "language"
+        k = "4bit" if type(mod).__name__ == "Linear4bit" else "fp16"
+        out.setdefault(part, {"4bit": 0, "fp16": 0})[k] += 1
+    return out
+
+
 def build_model(cfg, processor, device_index=0):
-    from transformers import Qwen2VLForConditionalGeneration, BitsAndBytesConfig
-    bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
-                             bnb_4bit_use_double_quant=True,
-                             bnb_4bit_compute_dtype=torch.float16)
+    from transformers import Qwen2VLForConditionalGeneration
+    bnb = bnb_config(cfg.skip_quant)
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         cfg.model_id, quantization_config=bnb, torch_dtype=torch.float16,
         device_map={"": device_index})
@@ -96,6 +128,8 @@ def build_model(cfg, processor, device_index=0):
         model.enable_input_require_grads()
     model.config.use_cache = False          # required with checkpointing during training
 
+    if cfg.skip_quant:
+        print(f"skip_quant={cfg.skip_quant} -> linear layers {quant_report(model)}")
     r = trainable_report(model, count_unquantized_params(cfg.model_id))
     print(f"Trainable params: {r['trainable']:,} / {r['total_unquantized']:,} "
           f"(unquantized) = {r['trainable_pct']:.3f}%")

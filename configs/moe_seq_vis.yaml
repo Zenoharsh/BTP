@@ -1,0 +1,3 @@
+moe:
+  route_level: sequence
+skip_quant: [vision]
