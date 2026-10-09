@@ -27,8 +27,11 @@ strongly task-aligned without task labels: the mutual information between task a
 $10\times$ that of token-level routing in every seed. Because each request uses one expert, the
 experts fold into standard per-task checkpoints with no accuracy loss. On a 4\,GB GTX~1650 laptop GPU
 the folded model runs at exactly the base model's cost (2.05\,GB peak memory, 18.8 tokens/s), whereas
-keeping the router costs 11\% more memory and 24\% slower decoding. \tbd{Efficiency sentence: accuracy
-of 4-bit + adapters at 256\,px vs the fp16 model at 512\,px, memory and image-token savings.}
+keeping the router costs 11\% more memory and 24\% slower decoding. Against the original full-precision model, the 4-bit adapted models are
+more accurate (77.7--78.4 vs 76.8 points) with $2.6\times$ less weight memory and peak GPU memory
+(1.6 vs 4.3\,GB), and they run on a 4\,GB laptop GPU that cannot load the full-precision model. With
+45\% fewer image tokens, sequence-level MoE-LoRA stays within noise of the full-precision model and
+degrades less than dense LoRA.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -62,6 +65,9 @@ token-level routing on held-out test data, with paired bootstrap tests.
 losslessly into standard per-task checkpoints.
 \item Measurements on a 4\,GB consumer laptop GPU showing that folded checkpoints have zero overhead
 over the base model, including a practical finding for GPUs without tensor cores.
+\item A comparison with the unquantised model showing that the 4-bit adapted model is more accurate at
+$2.6\times$ less GPU memory, and that MoE-LoRA is more robust than dense LoRA when image tokens are
+cut by 45\%.
 \end{itemize}
 
 \section{Related Work}
@@ -219,16 +225,62 @@ fp32 with 4-bit weights reduces time to first token from 12.8\,s to 3.0\,s at th
 0.5\,GB more memory.
 
 \subsection{Accuracy versus memory and resolution}
-\tbd{From run\_efficiency.sh: test accuracy, weights and peak memory of the fp16 model at 512\,px; 4-bit
-base at 256/512\,px; moe\_seq and dense16 trained at 256\,px (3 seeds), with paired bootstrap against the
-fp16 model. Claim to state only if supported: matching the fp16 model with $\approx$3$\times$ less weight
-memory and $\approx$45\% fewer image tokens.}
+Table~\ref{tab:eff} compares our models with the original unquantised model (fp16 weights and compute,
+512\,px), all on the test set. Image resolution sets the number of visual tokens: 440.6 per image at
+512\,px and 241.7 at 256\,px ($-45\%$). For 256\,px we rebuilt the teacher cache at that resolution
+and trained moe\_seq and dense16 with the same recipe (three seeds each; 42 and 36 minutes per run
+instead of about 65).
+
+\begin{table}[t]
+\centering
+\caption{Test accuracy (\%) and T4 GPU memory against the unquantised model. $\Delta$: difference to
+fp16 at 512\,px with 95\% paired bootstrap CI. 512\,px adapter rows are from Table~\ref{tab:main}.}
+\label{tab:eff}
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular}{lcccccc}
+\toprule
+Model & px & Chart & Doc & Spatial & Macro & Peak \\
+\midrule
+fp16 (original) & 512 & 76.5 & 84.9 & 69.0 & 76.8 & 4325\,MiB \\
+4-bit base & 512 & 72.0 & 82.2 & 60.5 & 71.6 & 1566\,MiB \\
+4-bit base & 256 & 70.5 & 72.8 & 58.5 & 67.3 & -- \\
+\midrule
+dense16 & 512 & 73.5 & 83.5 & 78.2 & \textbf{78.4} & $\approx$1.6\,GB \\
+moe\_seq & 512 & 73.0 & 84.4 & 75.8 & 77.7 & $\approx$1.75\,GB \\
+dense16 & 256 & 70.0 & 74.7 & 75.7 & 73.4 & 1588\,MiB \\
+moe\_seq & 256 & 71.7 & 75.0 & 77.0 & 74.6 & 1753\,MiB \\
+\bottomrule
+\end{tabular}\\[2pt]
+\footnotesize $\Delta$ vs fp16: 4-bit base 512 $-5.2$ [$-7.8,-2.7$]; dense16@256 $-3.3$ [$-6.3,-0.4$];
+moe\_seq@256 $-2.2$ [$-5.1,+0.7$].
+\end{table}
+
+Quantising to 4-bit cuts weight memory from 4213\,MiB to 1390\,MiB but costs 5.2 points. The adapters
+recover this loss and more: at 512\,px both dense16 (78.4) and moe\_seq (77.7) score above the
+unquantised model (76.8) while using about $2.6\times$ less weight and peak memory. The gain comes
+mostly from spatial reasoning (+7 to +9 points), where fine-tuning teaches the yes/no answer format;
+document OCR stays slightly below the unquantised model.
+
+Halving the image budget is harder. At 256\,px document OCR falls by about 10 points for every model,
+since small text becomes unreadable, while spatial reasoning is unaffected. Sequence-level MoE-LoRA
+remains within noise of the unquantised model ($-2.2$ points, CI includes zero) and is 1.2 points
+ahead of dense16 at the same resolution (higher on all three tasks). Dense16 is significantly below
+the unquantised model. At full resolution the two adapters were tied, so the extra capacity of task
+experts helps most when the input is compressed. Three seeds are too few to call this 1.2-point gap
+significant on its own.
+
+On the T4, 4-bit inference is not faster than fp16 (0.49--0.56\,s per answer vs 0.50\,s), since the
+GPU has ample memory bandwidth and dequantisation adds work. The savings are in memory and, at 256\,px,
+in image tokens. On the 4\,GB GTX~1650 the comparison is decided by memory: the unquantised model does
+not fit, while our models run in 2.05\,GB.
 
 \section{Conclusion}
 Sequence-level MoE-LoRA lets a 4-bit VLM be trained with several task experts on one T4 GPU and deployed
 as ordinary per-task checkpoints with no accuracy loss and no runtime overhead on a 4\,GB laptop GPU.
-It matches, but does not exceed, a dense LoRA in accuracy; its benefit is modularity and interpretable,
-label-free task specialisation at zero deployment cost. Token-level routing, by contrast, learns little
+It matches, but does not exceed, a dense LoRA in accuracy at full resolution; its benefit is modularity
+and interpretable, label-free task specialisation at zero deployment cost, plus better robustness than
+dense LoRA when image tokens are reduced. Both 4-bit adapted models exceed the original full-precision
+model with $2.6\times$ less GPU memory. Token-level routing, by contrast, learns little
 task structure and is less accurate. Limitations: three tasks and small training sets (400 per task),
 a single 2B backbone, and task profiles that assume the task is known at deployment.
 
