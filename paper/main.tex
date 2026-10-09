@@ -72,7 +72,10 @@ cut by 45\%.
 
 \section{Related Work}
 \textbf{Parameter-efficient adaptation.} LoRA~\cite{hu2022lora} learns low-rank updates to frozen
-weights; QLoRA~\cite{dettmers2023qlora} trains them on top of a 4-bit NF4 base, which we adopt.
+weights; QLoRA~\cite{dettmers2023qlora} trains them on top of a 4-bit NF4 base, which we adopt. MoPEQ~\cite{chitty2025mopeq}
+assigns mixed bit widths to the experts of large pretrained MoE VLMs by sensitivity. Our experts are
+small adapters (2.3\% of parameters) that are folded into the base for deployment, so we quantise the
+base uniformly and leave expert precision unchanged.
 \textbf{Mixture of experts.} Sparsely gated MoE layers~\cite{shazeer2017moe} and Switch
 Transformers~\cite{fedus2022switch} route tokens to experts with load-balancing losses; router
 $z$-losses~\cite{zoph2022stmoe} stabilise training. Mixtures of LoRA experts apply the idea to
