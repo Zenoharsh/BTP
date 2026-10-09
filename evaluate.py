@@ -218,18 +218,28 @@ def print_summary(res):
 
 
 # --------------------------------------------------------------------------- CLI
-def load_for_eval(cfg, max_pixels, base=False, adapters=None, device_index=0, fp16=False):
+def load_for_eval(cfg, max_pixels, base=False, adapters=None, device_index=0, fp16=False, mopeq_plan=None):
     """4-bit NF4 base (the deployment format) unless fp16=True (unquantized reference model).
-    cfg.skip_quant keeps parts of the base ("vision", "language") in fp16."""
+    cfg.skip_quant keeps parts of the base ("vision", "language") in fp16.
+    mopeq_plan: path to a mopeq.py plan json -> HQQ mixed precision (loaded on CPU in fp16, quantised
+    unit by unit onto the GPU, so it also works on a 4 GB card)."""
     from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
     from model import apply_moe_surgery, bnb_config, load_adapters, quant_report, resolve_token_ids
     min_pixels = min(cfg.data.min_pixels, max_pixels)
     processor = AutoProcessor.from_pretrained(cfg.model_id, min_pixels=min_pixels, max_pixels=max_pixels)
-    bnb = bnb_config(cfg.skip_quant)
-    model = Qwen2VLForConditionalGeneration.from_pretrained(
-        cfg.model_id, quantization_config=None if fp16 else bnb, torch_dtype=torch.float16,
-        device_map={"": device_index})
-    if cfg.skip_quant and not fp16:
+    if mopeq_plan:
+        from mopeq import apply_plan
+        model = Qwen2VLForConditionalGeneration.from_pretrained(cfg.model_id, torch_dtype=torch.float16)
+        dev = f"cuda:{device_index}" if torch.cuda.is_available() else "cpu"
+        with open(mopeq_plan) as f:
+            apply_plan(model, json.load(f), device=dev)
+        model.eval()
+    else:
+        bnb = bnb_config(cfg.skip_quant)
+        model = Qwen2VLForConditionalGeneration.from_pretrained(
+            cfg.model_id, quantization_config=None if fp16 else bnb, torch_dtype=torch.float16,
+            device_map={"": device_index})
+    if cfg.skip_quant and not fp16 and not mopeq_plan:
         print(f"skip_quant={cfg.skip_quant} -> linear layers {quant_report(model)}")
     token_ids = resolve_token_ids(processor)
     if not base:
@@ -252,10 +262,13 @@ def main():
     ap.add_argument("--fp16", action="store_true", help="unquantized fp16 base instead of 4-bit NF4")
     ap.add_argument("--skip_quant", nargs="+", default=None, choices=["vision", "language"],
                     help="keep these base parts fp16 (default: skip_quant from the config)")
+    ap.add_argument("--mopeq_plan", default=None, help="HQQ mixed-precision plan json from mopeq.py")
     args = ap.parse_args()
 
     if args.base == bool(args.adapters):
         ap.error("give exactly one of --base or --adapters")
+    if args.mopeq_plan and (args.fp16 or args.skip_quant):
+        ap.error("--mopeq_plan sets the precision of every unit; drop --fp16 / --skip_quant")
     if args.base and args.record_routing:
         ap.error("--record_routing needs --adapters (the base model has no router)")
 
@@ -269,8 +282,11 @@ def main():
     routing = os.path.join(os.path.dirname(os.path.abspath(out)), f"routing_{split_name}.npz") \
         if args.record_routing else None
 
-    model, processor, token_ids = load_for_eval(cfg, max_pixels, args.base, args.adapters, fp16=args.fp16)
-    weights_mib = model.get_memory_footprint() / 2 ** 20
+    model, processor, token_ids = load_for_eval(cfg, max_pixels, args.base, args.adapters, fp16=args.fp16,
+                                                mopeq_plan=args.mopeq_plan)
+    # HQQ keeps scales/zeros outside registered tensors, so measure what is really on the GPU
+    weights_mib = (torch.cuda.memory_allocated() if args.mopeq_plan and torch.cuda.is_available()
+                   else model.get_memory_footprint()) / 2 ** 20
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
     samples = load_samples(args.split, args.limit)
@@ -279,7 +295,7 @@ def main():
                    out_path=out, max_new_tokens=args.max_new_tokens, routing_path=routing)
     print_summary(res)
     peak = torch.cuda.max_memory_allocated() / 2 ** 20 if torch.cuda.is_available() else None
-    precision = "fp16" if args.fp16 else "nf4" + "".join(f"+fp16_{s}" for s in cfg.skip_quant)
+    precision = "fp16" if args.fp16 else f"hqq:{os.path.basename(args.mopeq_plan)}" if args.mopeq_plan         else "nf4" + "".join(f"+fp16_{s}" for s in cfg.skip_quant)
     print(f"weights {weights_mib:.0f} MiB | peak VRAM {peak or 0:.0f} MiB | {precision}")
     res.update({"weights_mib": weights_mib, "peak_vram_mib": peak, "precision": precision,
                 "split": args.split, "max_pixels": max_pixels, "base": args.base,

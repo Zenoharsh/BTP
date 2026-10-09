@@ -10,3 +10,4 @@ torchvision
 qwen-vl-utils
 pytest
 pyyaml
+hqq==0.2.8.post1
