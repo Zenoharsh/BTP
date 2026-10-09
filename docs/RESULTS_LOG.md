@@ -97,6 +97,31 @@ CPU-only (i5-12450H, bf16, 8 GB RAM): ~5 min per sample, impractical in PyTorch.
 NF4 with an fp16 vision encoder (skip_quant vision): 2339 MiB weights on the GTX 1650.
 HQQ (mopeq.py) uniform 4-bit: 1526 MiB weights; a mixed plan at ~3 bits: 1326 MiB.
 
+## Mixed precision by component (TEST, run_vision.sh, 512 px)
+Base model, which part loses accuracy in 4-bit:
+| base model | macro | chart | doc | spatial | weights | peak VRAM | latency T4 |
+|---|---|---|---|---|---|---|---|
+| fp16 (all) | 76.8 | 76.5 | 84.9 | 69.0 | 4213 MiB | 4325 MiB | 0.503 s |
+| NF4 language + fp16 vision (b0vis) | 73.3 | 73.5 | 84.4 | 62.0 | 2339 MiB | 2481 MiB | 0.559 s |
+| NF4 vision + fp16 language (b0lang) | 74.8 | 73.5 | 83.9 | 67.0 | 3265 MiB | 3411 MiB | 0.506 s |
+| NF4 (all) | 71.6 | 72.0 | 82.2 | 60.5 | 1390 MiB | 1566 MiB | 0.557 s |
+
+vs fp16: b0vis −3.5 [−5.7, −1.3]; b0lang −2.0 [−3.8, −0.3]; NF4 −5.2 [−7.8, −2.7]. Quantising the
+language model costs ~3.5 points, the vision encoder ~2.0 (roughly additive; ~1.8-1.9 points per GB of
+fp16 kept, i.e. sensitivity roughly proportional to size at this coarse granularity). Spatial
+reasoning is hit hardest (69.0 -> 60.5).
+
+Trained with the vision encoder kept fp16 (3 seeds), TEST:
+| variant | chart | doc | spatial | macro | Δ vs fp16 base [95% CI] | p | weights | peak |
+|---|---|---|---|---|---|---|---|---|
+| dense16_vis | 74.0 ± 1.3 | 83.7 ± 0.1 | 78.0 ± 0.9 | 78.6 ± 0.7 | +1.8 [−0.6, +4.1] | 0.068 | 2393 MiB | 2535 MiB |
+| moe_seq_vis | 73.8 ± 0.3 | 83.6 ± 0.3 | 76.7 ± 2.3 | 78.0 ± 0.8 | +1.2 [−0.9, +3.4] | 0.129 | 2555 MiB | 2700 MiB |
+
+Per-run test: dense16_vis 78.05 / 79.41 / 78.19 · moe_seq_vis 77.30 / 78.84 / 77.97. Dev bests:
+dense16_vis 84.28 / 84.95 / 86.95 · moe_seq_vis 84.28 / 83.89 / 84.68 (~62-64 min per run).
+Reading: vs the all-NF4 runs (dense16 78.4, moe_seq 77.7) keeping vision fp16 adds only +0.2 / +0.3 for
+~+950 MiB -> the adapters already absorb the quantisation loss; uniform NF4 + adapters is the better
+deployment point.
+
 ## Pending
-- run_vision.sh (where the 5.2-point NF4 loss comes from; moe_seq / dense16 with fp16 vision).
 - run_mopeq.sh (MoPEQ-style sensitivity-guided mixed precision vs uniform HQQ 3/4-bit, TEST).
