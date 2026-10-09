@@ -286,6 +286,12 @@ dense LoRA when image tokens are reduced. Both 4-bit adapted models exceed the o
 model with $2.6\times$ less GPU memory. Token-level routing, by contrast, learns little
 task structure and is less accurate. Limitations: three tasks and small training sets (400 per task),
 a single 2B backbone, and task profiles that assume the task is known at deployment.
+Mixed-precision expert quantisation such as MoPEQ~\cite{chitty2025mopeq} gives little here, because our
+experts are 2.3\% of the parameters and are folded away. We expect it to matter when the experts are a
+large share of the weights: pretrained MoE VLMs, much larger or higher-rank experts that must stay
+unfolded, or 10B-scale backbones where a few gigabytes decide whether a model fits on an edge device.
+Sensitivity-guided mixed precision for the base model, for example keeping the vision encoder at higher
+precision, is a second direction, since uniform 4-bit quantisation costs the untuned model 5.2 points.
 
 \bibliographystyle{IEEEtran}
 \bibliography{refs}
