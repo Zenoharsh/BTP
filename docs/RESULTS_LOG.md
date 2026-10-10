@@ -141,5 +141,20 @@ lm.0.attn 2.8e-2, then vision blocks 4/29/7/20/6, lm.14.attn, lm.3.attn (first/l
 vision->language merger).
 The Hessian (MoPEQ metric) plans did not appear: the Hessian sensitivity step failed (log pending).
 
+### MoPEQ Hessian metric (Hutchinson, finite-difference HVPs in fp16, 16 calib x 2 probes, 256-px calibration)
+| plan | avg bits (vision / language) | units per bits | macro | Δ vs hqq_u4 at same memory |
+|---|---|---|---|---|
+| hqq_hess_4 | 3.99 (5.15 / 3.39) | 2:26 3:6 4:37 8:20 | 58.6 | −15.3 [−19.5, −11.1] |
+| hqq_hess_3.5 | 3.49 (4.47 / 2.99) | 2:28 3:15 4:34 8:12 | 51.0 | −23.0 |
+| hqq_hess_3 | 2.99 (3.56 / 2.70) | 2:31 3:24 4:30 8:4 | 33.4 | −33.5 vs hqq_u3 |
+KL vs Hessian sensitivity: Spearman ρ 0.19 / 0.17 / 0.27 (2 / 3 / 4 bit, 89 units); same bits for
+29 / 41 / 34 of 89 units at the 3 / 3.5 / 4-bit budgets. The Hessian estimates sent 26-31 units to
+2 bit -> large accuracy collapse. Likely cause: noisy / non-positive trace estimates (fp16 FD-HVP, few
+probes) clamped to 0, so those units look free to quantise.
+
+Same-memory paired bootstrap (KL plans, base model): kl_4 vs u4 +1.2 [−0.9, +3.4] (p 0.131) ·
+kl_3.5 vs u4 +0.1 [−3.3, +3.5] at 11% less memory · kl_3 vs u3 +2.2 [−0.9, +5.2] (p 0.085) ·
+u4 vs u3 +7.1. Consistent direction but not significant at 95% for a single base plan.
+
 ## Pending
 - Hessian sensitivity rerun; adapters trained on a mixed plan vs uniform.
