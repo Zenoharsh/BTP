@@ -4,20 +4,32 @@
 #      2/3/4/8 bits: KL to the fp16 model (both GPUs), then MoPEQ/HAWQ Hessian traces (GPU 0)
 #   2. allocation at the memory of uniform 3 / 3.5 / 4-bit (exact knapsack), plus uniform baselines
 #   3. base model with each plan on TEST: accuracy, weights, peak VRAM
-# Attach the run_efficiency (V3) output as an Input to reuse the fp16 / NF4 test references (else
-# they are recomputed). Resumable; results in runs/results_mopeq/SUMMARY.txt
+# Attach an earlier output as an Input to reuse the fp16 / NF4 test references and any finished MoPEQ
+# step (sensitivities, plans, evaluations); missing pieces are (re)computed. Resumable; results in
+# runs/results_mopeq/SUMMARY.txt
 cd "$(dirname "$0")/.."
 mkdir -p logs runs/mopeq runs/results_mopeq
 say() { echo "[$(date +%H:%M:%S)] $*"; }
 T=data/v3/test.jsonl
 M=runs/mopeq
 pip install -q hqq
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 for ref in fp16_512 b0_512; do              # reuse earlier references if attached
     [ -f runs/$ref/test_preds.jsonl ] && continue
     hit=$(find /kaggle/input -path "*runs/$ref/test_preds.jsonl" 2>/dev/null | head -n 1)
     [ -n "$hit" ] && mkdir -p runs/$ref && cp "$(dirname "$hit")"/* runs/$ref/ && say "reused $ref"
 done
+
+# reuse a previous run_mopeq output (sensitivities / plans / evaluations) if attached
+prev=$(find /kaggle/input -path "*runs/mopeq/sens_kl_0.json" 2>/dev/null | head -n 1)
+if [ -n "$prev" ]; then
+    root=$(dirname "$(dirname "$(dirname "$prev")")")
+    for f in "$root"/runs/mopeq/*.json; do [ -f $M/$(basename $f) ] || cp "$f" $M/; done
+    for d in "$root"/runs/hqq_*; do [ -d runs/$(basename $d) ] || cp -r "$d" runs/; done
+    for f in "$root"/logs/mopeq_*.log; do [ -f logs/$(basename $f) ] || cp "$f" logs/ 2>/dev/null; done
+    say "reused previous MoPEQ outputs from $root"
+fi
 
 ev() {  # gpu name extra-args...
     local gpu=$1 name=$2; shift 2
@@ -36,12 +48,17 @@ done
 wait
 for s in 0 1; do [ -f $M/sens_kl_$s.json ] || { say "!! KL sensitivity shard $s failed"; tail -n 20 logs/mopeq_sens_kl_$s.log; exit 1; }; done
 
-# Hessian (MoPEQ's metric) on GPU 0 while GPU 1 already evaluates the uniform baselines
-(
-    [ -f $M/sens_hessian.json ] || { say "GPU0 Hessian sensitivity"; CUDA_VISIBLE_DEVICES=0 python mopeq.py sensitivity \
-        --metric hessian --calib 16 --n_iter 2 --max_pixels 200704 --out $M/sens_hessian.json \
-        > logs/mopeq_sens_hessian.log 2>&1 || say "!! Hessian sensitivity failed (see log); KL plans still run"; }
-) &
+# Hessian (MoPEQ's metric): Hutchinson traces with finite-difference Hessian-vector products (exact
+# double backprop does not fit a T4), split over both GPUs; uniform baselines afterwards
+for s in 0 1; do
+    [ -f $M/sens_hessian_$s.json ] || { say "GPU$s Hessian sensitivity shard $s"; \
+        CUDA_VISIBLE_DEVICES=$s python mopeq.py sensitivity --metric hessian --hvp fd --calib 16 --n_iter 2 \
+            --max_pixels 200704 --shard $s --num_shards 2 --out $M/sens_hessian_$s.json \
+            > logs/mopeq_sens_hessian_$s.log 2>&1 || say "!! Hessian shard $s failed (see log); KL plans still run" & }
+done
+wait
+HESS=""
+[ -f $M/sens_hessian_0.json ] && [ -f $M/sens_hessian_1.json ] && HESS="$M/sens_hessian_0.json $M/sens_hessian_1.json"
 (
     for b in 4 3; do
         [ -f $M/plan_u$b.json ] || python mopeq.py uniform --sizes $M/sens_kl_0.json $M/sens_kl_1.json --bits $b             --out $M/plan_u$b.json > /dev/null
@@ -57,7 +74,7 @@ wait
 for a in 3 3.5 4; do
     python mopeq.py allocate --sens $M/sens_kl_0.json $M/sens_kl_1.json --avg_bits $a --out $M/plan_kl_$a.json \
         > logs/mopeq_alloc_kl_$a.log 2>&1
-    [ -f $M/sens_hessian.json ] && python mopeq.py allocate --sens $M/sens_hessian.json --avg_bits $a \
+    [ -n "$HESS" ] && python mopeq.py allocate --sens $HESS --avg_bits $a \
         --out $M/plan_hess_$a.json > logs/mopeq_alloc_hess_$a.log 2>&1
 done
 
@@ -65,7 +82,8 @@ done
 ( for a in 3 4; do ev 0 hqq_kl_$a --mopeq_plan $M/plan_kl_$a.json; done
   [ -f $M/plan_hess_3.json ] && ev 0 hqq_hess_3 --mopeq_plan $M/plan_hess_3.json ) &
 ( ev 1 hqq_kl_3.5 --mopeq_plan $M/plan_kl_3.5.json
-  [ -f $M/plan_hess_4.json ] && ev 1 hqq_hess_4 --mopeq_plan $M/plan_hess_4.json ) &
+  [ -f $M/plan_hess_4.json ] && ev 1 hqq_hess_4 --mopeq_plan $M/plan_hess_4.json
+  [ -f $M/plan_hess_3.5.json ] && ev 1 hqq_hess_3.5 --mopeq_plan $M/plan_hess_3.5.json ) &
 wait
 
 # ---------------------------------------------------------------- 4. summary
@@ -82,6 +100,14 @@ print(f\"{'$p'.split('/')[-1]:<22} avg {d['avg_bits']:.2f} bit  vision {d['avg_b
     mkdir -p runs/_none
     python scripts/aggregate.py --runs runs/_none --preds test_preds.jsonl --ref fp16_512 --extra $extras \
         --out runs/results_mopeq
+    echo; echo "== TEST table, same memory: mixed vs uniform HQQ 4-bit (paired bootstrap)"
+    python scripts/aggregate.py --runs runs/_none --preds test_preds.jsonl --ref hqq_u4 --extra $extras \
+        --out runs/results_mopeq/vs_u4
+    echo; echo "== TEST table, same memory: mixed vs uniform HQQ 3-bit (paired bootstrap)"
+    python scripts/aggregate.py --runs runs/_none --preds test_preds.jsonl --ref hqq_u3 --extra $extras \
+        --out runs/results_mopeq/vs_u3
+    echo; echo "== Hessian (MoPEQ) vs KL sensitivity: rank agreement and plan overlap"
+    python scripts/mopeq_compare.py
     echo; echo "== most sensitive units (KL, 2-bit)"
     python - <<'EOF'
 import json

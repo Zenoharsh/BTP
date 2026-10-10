@@ -211,14 +211,53 @@ def sensitivity_kl(model, units, calib, token_ids, bits=BITS, group_size=GROUP_S
     return sens
 
 
+def _answer_ce(model, b, labels, scale=1.0):
+    logits = model(**b, use_cache=False).logits[:, :-1].float()
+    return F.cross_entropy(logits.reshape(-1, logits.shape[-1]), labels.reshape(-1), ignore_index=-100) * scale
+
+
+def _vhv_exact(model, b, labels, flat, v):
+    """v^T H v by double backprop (exact; needs the second-order graph -> small models / fp32 only)."""
+    with sdpa_kernel(SDPBackend.MATH):                    # fused SDPA has no double backward
+        g = torch.autograd.grad(_answer_ce(model, b, labels), flat, create_graph=True)
+        hv = torch.autograd.grad(g, flat, grad_outputs=v)
+    return [float((h.float() * w.float()).sum()) for h, w in zip(hv, v)]
+
+
+def _vhv_fd(model, b, labels, flat, v, rel_eps=1e-2, scale=1024.0):
+    """v^T H v by a central finite difference of gradients, H v ~ (g(w + e v) - g(w - e v)) / 2e.
+    Two first-order backward passes, no second-order graph: fits a 2B fp16 model on a T4. One step e
+    for all tensors (a per-tensor e would turn the cross-tensor blocks into H E v instead of H v),
+    relative to the weights' RMS because fp16 cannot resolve smaller steps; the loss is scaled to
+    keep fp16 gradients away from underflow."""
+    orig = [p.detach().clone() for p in flat]
+    sq = sum(float(o.float().pow(2).sum()) for o in orig)
+    e = rel_eps * math.sqrt(sq / max(sum(o.numel() for o in orig), 1)) or rel_eps
+    eps = [e] * len(orig)
+    grads = []
+    for sign in (1.0, -1.0):
+        with torch.no_grad():
+            for p, o, w, e in zip(flat, orig, v, eps):
+                p.copy_(o + sign * e * w.to(o.dtype))
+        grads.append(torch.autograd.grad(_answer_ce(model, b, labels, scale), flat))
+    with torch.no_grad():
+        for p, o in zip(flat, orig):
+            p.copy_(o)
+    return [float(((gp.float() - gm.float()) * w.float()).sum()) / (2 * e * scale)
+            for gp, gm, w, e in zip(grads[0], grads[1], v, eps)]
+
+
 def sensitivity_hessian(model, units, calib, token_ids, bits=BITS, group_size=GROUP_SIZE, n_iter=4,
-                        units_per_pass=8, log=print):
+                        units_per_pass=8, hvp="fd", seed=0, log=print):
     """HAWQ / MoPEQ style: s[u][b] = Tr(H_u)/n_u * ||W_u - Q_b(W_u)||^2, Hutchinson estimate of the
-    trace of the Hessian of the answer-token CE loss w.r.t. the unit's Linear weights."""
+    trace of the Hessian of the answer-token CE loss w.r.t. the unit's Linear weights.
+    hvp: "fd" (finite-difference Hessian-vector products, memory of ordinary training) or "exact"."""
     from utils import get_answer_labels
+    vhv_fn = {"fd": _vhv_fd, "exact": _vhv_exact}[hvp]
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
+    gen = torch.Generator().manual_seed(seed)
     names = list(units)
     trace = {}
     for s in range(0, len(names), units_per_pass):
@@ -232,30 +271,26 @@ def sensitivity_hessian(model, units, calib, token_ids, bits=BITS, group_size=GR
             labels = get_answer_labels(b["input_ids"], token_ids["im_start"], token_ids["assistant"],
                                        token_ids["im_end"])[:, 1:].to(b["input_ids"].device)
             for _ in range(n_iter):
-                # fused SDPA kernels have no double backward: use the math kernel for the HVP
-                with sdpa_kernel(SDPBackend.MATH):
-                    logits = model(**b, use_cache=False).logits[:, :-1].float()
-                    loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), labels.reshape(-1),
-                                           ignore_index=-100)
-                    g = torch.autograd.grad(loss, flat, create_graph=True)
-                    v = [torch.randint_like(p, 2) * 2 - 1 for p in flat]
-                    hv = torch.autograd.grad(g, flat, grad_outputs=v)
-                vhv = [float((h.float() * w.float()).sum()) for h, w in zip(hv, v)]
-                if all(math.isfinite(x) for x in vhv):            # fp16 HVPs can overflow: drop the probe
+                v = [(torch.randint(0, 2, p.shape, generator=gen) * 2 - 1).to(p.device, p.dtype) for p in flat]
+                vhv = vhv_fn(model, b, labels, flat, v)
+                if all(math.isfinite(x) for x in vhv):            # fp16 can overflow: drop the probe
                     i = 0
                     for u in group:
                         for _ in params[u]:
                             acc[u] += vhv[i]
                             i += 1
                     probes += 1
-                del g, hv, v, logits, loss
+                del v
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         for p in flat:
             p.requires_grad_(False)
         if probes == 0:
             raise FloatingPointError(f"all Hutchinson probes overflowed for {group}; use fp32 or smaller inputs")
         for u in group:
             trace[u] = acc[u] / probes
-        log(f"hessian traces {group[0]}..{group[-1]}: " + " ".join(f"{u}={trace[u]:.3e}" for u in group))
+        log(f"hessian traces {group[0]}..{group[-1]} ({probes} probes): "
+            + " ".join(f"{u}={trace[u]:.3e}" for u in group))
     sens = {}
     for u in names:
         n = unit_params(units[u])
@@ -353,6 +388,9 @@ def main():
     s.add_argument("--bits", type=int, nargs="+", default=list(BITS))
     s.add_argument("--group_size", type=int, default=GROUP_SIZE)
     s.add_argument("--n_iter", type=int, default=4, help="Hutchinson probes per sample (hessian)")
+    s.add_argument("--hvp", choices=["fd", "exact"], default="fd",
+                   help="hessian: finite-difference (fits a T4) or exact double-backprop HVPs")
+    s.add_argument("--units_per_pass", type=int, default=8, help="hessian: units whose weights get grads at once")
     s.add_argument("--units", default=None, help="regex: only these units")
     s.add_argument("--shard", type=int, default=0, help="this process handles units i %% num_shards == shard")
     s.add_argument("--num_shards", type=int, default=1)
@@ -391,7 +429,8 @@ def main():
             sens = sensitivity_kl(model, units, calib, token_ids, args.bits, args.group_size)
         else:
             sens, extra["trace"] = sensitivity_hessian(model, units, calib, token_ids, args.bits,
-                                                       args.group_size, args.n_iter)
+                                                       args.group_size, args.n_iter, args.units_per_pass,
+                                                       args.hvp)
         json.dump({"metric": args.metric, "group_size": args.group_size, "sizes": sizes, "sens": sens,
                    "calib": args.calib, **extra}, open(args.out, "w"), indent=1)
         print(f"-> {args.out}")

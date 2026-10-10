@@ -75,6 +75,20 @@ def test_sensitivity_kl_and_hessian():
     assert not any(p.requires_grad for p in model.parameters())
 
 
+def test_hessian_fd_matches_exact():
+    """Finite-difference HVPs (the T4-sized default) agree with exact double-backprop HVPs."""
+    _, model, tid, b = tiny()
+    with torch.no_grad():
+        model.lm_head.weight.mul_(20)
+    units = find_units(model)
+    kw = dict(bits=(2, 4), group_size=G, n_iter=3, units_per_pass=4, seed=1, log=lambda *_: None)
+    _, t_exact = sensitivity_hessian(model, units, [b], tid, hvp="exact", **kw)
+    _, t_fd = sensitivity_hessian(model, units, [b], tid, hvp="fd", **kw)
+    scale = max(abs(v) for v in t_exact.values())
+    for u in units:
+        assert abs(t_fd[u] - t_exact[u]) <= 0.05 * abs(t_exact[u]) + 1e-3 * scale, (u, t_fd[u], t_exact[u])
+
+
 def test_allocate_is_optimal_and_within_budget():
     sizes = {"a": 4096, "b": 8192, "c": 2048}
     sens = {"a": {2: 9.0, 4: 1.0, 8: 0.1}, "b": {2: 0.5, 4: 0.2, 8: 0.0}, "c": {2: 3.0, 4: 0.5, 8: 0.0}}
