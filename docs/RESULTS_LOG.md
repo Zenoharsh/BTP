@@ -156,5 +156,17 @@ Same-memory paired bootstrap (KL plans, base model): kl_4 vs u4 +1.2 [−0.9, +3
 kl_3.5 vs u4 +0.1 [−3.3, +3.5] at 11% less memory · kl_3 vs u3 +2.2 [−0.9, +5.2] (p 0.085) ·
 u4 vs u3 +7.1. Consistent direction but not significant at 95% for a single base plan.
 
+## moe_seq trained on HQQ bases (TEST, run_mopeq_train.sh, 3 seeds each, 512 px)
+| variant | chart | doc | spatial | macro | Δ vs fp16 base [95% CI] | p | weights | peak VRAM | lat T4 |
+|---|---|---|---|---|---|---|---|---|---|
+| moe_seq_hqq4 (uniform HQQ 4-bit) | 76.8 ± 0.8 | 83.8 ± 0.8 | 78.2 ± 1.6 | 79.6 ± 0.8 | +2.8 [+0.4, +5.2] | 0.011 | 1724 MiB | 1909 MiB | ~0.99 s |
+| moe_seq_mopeq35 (KL plan, 3.5-bit memory) | 74.3 ± 0.3 | 81.8 ± 0.6 | 77.8 ± 2.1 | 78.0 ± 0.7 | +1.2 [−1.4, +3.8] | 0.177 | 1630 MiB | 1815 MiB | ~1.21 s |
+Per-run test: hqq4 79.14 / 80.49 / 79.13 · mopeq35 78.38 / 77.24 / 78.38.
+Dev best: hqq4 79.22 / 81.22 / 82.84 · mopeq35 78.98 / 78.31 / 81.69 (NF4 moe_seq dev: 84.55 / 84.71 /
+85.27 -> dev and test rank NF4 vs HQQ differently; to be checked). Train time 83 min (hqq4), 89 min
+(mopeq35) vs 67 min NF4.
+Reference: moe_seq on bitsandbytes NF4 77.7 ± 0.9 (test), fp16 base 76.8 (4325 MiB peak).
+Not yet bootstrapped: hqq4 / mopeq35 vs NF4 moe_seq (NF4 predictions were not attached).
+
 ## Pending
 - Hessian sensitivity rerun; adapters trained on a mixed plan vs uniform.
