@@ -184,6 +184,19 @@ Dev best: hqq4 79.22 / 81.22 / 82.84 · mopeq35 78.98 / 78.31 / 81.69 (NF4 moe_s
 Reference: moe_seq on bitsandbytes NF4 77.7 ± 0.9 (test), fp16 base 76.8 (4325 MiB peak).
 Not yet bootstrapped: hqq4 / mopeq35 vs NF4 moe_seq (NF4 predictions were not attached).
 
+### Dev re-check (run_devcheck.sh): saved best/ adapters re-evaluated on dev with evaluate.py
+| run | dev in training | dev re-eval | chart | doc | spatial |
+|---|---|---|---|---|---|
+| moe_seq_hqq4_s0 | 79.22 | 79.22 | 60.0 | 89.7 | 88.0 |
+| moe_seq_hqq4_s1 | 81.22 | 81.22 | 66.0 | 89.7 | 88.0 |
+| moe_seq_hqq4_s2 | 82.84 | 82.84 | 64.0 | 90.5 | 94.0 |
+| moe_seq_mopeq35_s0 | 78.98 | 78.98 | 62.0 | 92.9 | 82.0 |
+| moe_seq_mopeq35_s1 | 78.31 | 78.31 | 58.0 | 92.9 | 84.0 |
+| moe_seq_mopeq35_s2 | 81.69 | 81.69 | 64.0 | 89.1 | 92.0 |
+Identical to the 4th decimal -> no pipeline difference. The dev gap vs NF4 moe_seq (84.6-85.3) is
+almost entirely chart_qa on 50 dev samples (60-66 vs ~74); on TEST (200 per task) HQQ-4 chart is 76.8
+vs 73.0 for NF4. Dev/test disagreement = small-split variance on one task; TEST is the reported result.
+
 ## Other facts used in the paper
 - Trainable parameters: 56.6M (2.317% of 2.442B unquantised) for MoE-LoRA (4 experts, rank 16, 28
   layers); dense16 is a quarter of that. Quantisable base parameters (mopeq units): 1.973B in 89 units
@@ -195,6 +208,5 @@ Not yet bootstrapped: hqq4 / mopeq35 vs NF4 moe_seq (NF4 predictions were not at
   moe s0/s1, moe_seq s0).
 
 ## Pending
-- Dev re-check of the HQQ runs (run_devcheck.sh): in-training dev score vs re-evaluated best/ adapters.
 - Paired bootstrap of the HQQ / MoPEQ runs vs NF4 moe_seq (needs the NF4 test predictions locally).
 - Optional: Hessian sensitivity in fp32 with more probes (fair MoPEQ-metric comparison).
