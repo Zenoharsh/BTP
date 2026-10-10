@@ -56,6 +56,7 @@ class Config:
     loss: LossConfig = field(default_factory=LossConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     skip_quant: list = field(default_factory=list)   # base parts kept fp16 instead of NF4, e.g. [vision]
+    mopeq_plan: Optional[str] = None                 # mopeq.py plan json: HQQ mixed precision instead of NF4
 
 def _merge_dicts(base, update):
     for k, v in update.items():
@@ -103,6 +104,7 @@ def load(yaml_path: str = None) -> Config:
     cfg = Config()
     cfg.model_id = base_dict.get("model_id", cfg.model_id)
     cfg.skip_quant = list(base_dict.get("skip_quant") or [])
+    cfg.mopeq_plan = base_dict.get("mopeq_plan") or None
     if "data" in base_dict:
         for k, v in base_dict["data"].items():
             setattr(cfg.data, k, v)

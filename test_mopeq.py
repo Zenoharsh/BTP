@@ -138,6 +138,37 @@ def test_apply_plan_from_json_with_device():
     assert torch.isfinite(logits(model, b)).all()
 
 
+def test_training_on_hqq_base_with_checkpointing():
+    """MoE-LoRA training on a mixed-precision HQQ base (as train.py does with cfg.mopeq_plan):
+    loss falls with gradient checkpointing on, and saved adapters reload onto a fresh HQQ base."""
+    import json as _json
+    from model import load_adapters
+    from train import train
+    cfg, model, tid, b = tiny()
+    cfg.loss.kd, cfg.train.epochs, cfg.train.grad_accum, cfg.train.lr = 0.0, 8, 1, 3e-3
+    cfg.train.warmup_ratio, cfg.train.eval_every = 0.0, 100
+    fresh = copy.deepcopy(model)
+    units = find_units(model)
+    plan = {"bits": {u: (2 if u == "lm.0.mlp" else 3 if u.startswith("vis") else 4) for u in units}, "group_size": G}
+    apply_plan(model, plan)
+    apply_moe_surgery(model, cfg, tid["image_pad"], tid["im_start"])
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    model.enable_input_require_grads()
+    with torch.no_grad():
+        model.lm_head.weight.mul_(30)
+        fresh.lm_head.weight.mul_(30)
+    samples = [{**{k: v.clone() for k, v in b.items()}, "uids": [f"s{i}"], "tasks": ["chart_qa"]} for i in range(2)]
+    with tempfile.TemporaryDirectory() as d:
+        summ = train(cfg, model, tid, samples, os.path.join(d, "run"), cfg_dict={}, log_every=1000)
+        steps = [_json.loads(l) for l in open(os.path.join(d, "run", "train_log.jsonl"))]
+        assert summ["steps"] == 16 and steps[-1]["ce"] < 0.5 * steps[0]["ce"], (steps[0]["ce"], steps[-1]["ce"])
+        apply_plan(fresh, plan)
+        apply_moe_surgery(fresh, cfg, tid["image_pad"], tid["im_start"])
+        load_adapters(fresh, os.path.join(d, "run", "last"))
+        model.eval(); fresh.eval()
+        assert torch.allclose(logits(model, b), logits(fresh, b), atol=1e-5)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
     for t in tests:

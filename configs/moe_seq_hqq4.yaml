@@ -1,0 +1,3 @@
+moe:
+  route_level: sequence
+mopeq_plan: runs/mopeq/plan_u4.json       # control: uniform HQQ 4-bit

@@ -114,12 +114,30 @@ def quant_report(model):
     return out
 
 
+def load_hqq_base(cfg, plan_path, device_index=0):
+    """fp16 base loaded on CPU, then quantised unit by unit onto the GPU with a mopeq.py plan
+    (HQQ mixed precision), so the fp16 model never has to fit in GPU memory."""
+    from transformers import Qwen2VLForConditionalGeneration
+    from mopeq import apply_plan
+    if cfg.skip_quant:
+        raise ValueError("mopeq_plan sets every unit's precision; do not combine it with skip_quant")
+    model = Qwen2VLForConditionalGeneration.from_pretrained(cfg.model_id, torch_dtype=torch.float16)
+    dev = f"cuda:{device_index}" if torch.cuda.is_available() else "cpu"
+    with open(plan_path) as f:
+        apply_plan(model, json.load(f), device=dev)
+    print(f"base quantised with HQQ plan {plan_path}")
+    return model
+
+
 def build_model(cfg, processor, device_index=0):
     from transformers import Qwen2VLForConditionalGeneration
-    bnb = bnb_config(cfg.skip_quant)
-    model = Qwen2VLForConditionalGeneration.from_pretrained(
-        cfg.model_id, quantization_config=bnb, torch_dtype=torch.float16,
-        device_map={"": device_index})
+    if cfg.mopeq_plan:
+        model = load_hqq_base(cfg, cfg.mopeq_plan, device_index)
+    else:
+        bnb = bnb_config(cfg.skip_quant)
+        model = Qwen2VLForConditionalGeneration.from_pretrained(
+            cfg.model_id, quantization_config=bnb, torch_dtype=torch.float16,
+            device_map={"": device_index})
     token_ids = resolve_token_ids(processor)
     apply_moe_surgery(model, cfg, token_ids["image_pad"], token_ids["im_start"])
 
