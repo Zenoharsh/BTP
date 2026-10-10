@@ -31,7 +31,11 @@ keeping the router costs 11\% more memory and 24\% slower decoding. Against the 
 more accurate (77.7--78.4 vs 76.8 points) with $2.6\times$ less weight memory and peak GPU memory
 (1.6 vs 4.3\,GB), and they run on a 4\,GB laptop GPU that cannot load the full-precision model. With
 45\% fewer image tokens, sequence-level MoE-LoRA stays within noise of the full-precision model and
-degrades less than dense LoRA.
+degrades less than dense LoRA. With HQQ instead of NF4 as the 4-bit quantiser, MoE-LoRA exceeds the
+full-precision model by 2.8 points (95\% CI $[+0.4, +5.2]$) at $2.4\times$ less weight memory.
+Following MoPEQ, we also allocate 2--8 bits per layer by measured sensitivity: this beats uniform
+quantisation of the untuned model at equal memory, but the advantage disappears after fine-tuning,
+and a low-budget Hessian-trace estimate of sensitivity produces harmful allocations.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -68,6 +72,8 @@ over the base model, including a practical finding for GPUs without tensor cores
 \item A comparison with the unquantised model showing that the 4-bit adapted model is more accurate at
 $2.6\times$ less GPU memory, and that MoE-LoRA is more robust than dense LoRA when image tokens are
 cut by 45\%.
+\item A MoPEQ-style study of per-layer mixed precision for the frozen base (2/3/4/8-bit, measured
+KL vs Hessian-trace sensitivity), with and without adapter training.
 \end{itemize}
 
 \section{Related Work}
@@ -311,6 +317,65 @@ moe\_seq, vision fp16 & 78.0 & $+1.2$ [$-0.9,+3.4$] & 2555\,MiB \\
 \end{tabular}
 \end{table}
 
+\subsection{Sensitivity-guided mixed precision}
+Following MoPEQ~\cite{chitty2025mopeq}, we split the frozen base into 89 units (32 vision blocks, the
+vision--language merger, and the attention and MLP of each of the 28 language layers; 1.97B
+parameters) and choose 2, 3, 4 or 8 bits per unit with HQQ~\cite{badri2023hqq} (group size 64).
+Sensitivity is measured in two ways on 32 training samples: directly, as the KL divergence between the
+fp16 model and the model with only that unit quantised, and with the HAWQ/MoPEQ
+proxy~\cite{dong2019hawq}, the Hessian trace per parameter (Hutchinson estimate with finite-difference
+Hessian-vector products, 16 samples at 256\,px, the most a T4 allows) times the quantisation error.
+An exact knapsack then minimises the summed sensitivity at the memory of uniform 3, 3.5 or 4 bits.
+
+\begin{table}[t]
+\centering
+\caption{Mixed precision of the base (test, \%). Quantised-part memory in MiB; trained rows: moe\_seq,
+mean of three seeds. $\Delta$ vs fp16 with 95\% paired bootstrap CI.}
+\label{tab:mopeq}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lccc}
+\toprule
+Base & Quant.\ MiB & Macro & $\Delta$ vs fp16 \\
+\midrule
+fp16 & -- & 76.8 & -- \\
+NF4 (bitsandbytes) & -- & 71.6 & $-5.2$ \\
+HQQ uniform 4-bit & 1059 & 74.0 & $-2.8$ \\
+HQQ uniform 3-bit & 823 & 66.8 & $-10.0$ \\
+KL-guided, 4 bit avg & 1055 & 75.2 & $-1.6$ \\
+KL-guided, 3.5 bit avg & 938 & 74.0 & $-2.8$ \\
+KL-guided, 3 bit avg & 821 & 69.0 & $-7.8$ \\
+Hessian-guided, 4 bit avg & 1055 & 58.6 & $-18.2$ \\
+Hessian-guided, 3 bit avg & 821 & 33.4 & $-43.4$ \\
+\midrule
+moe\_seq, NF4 & -- & 77.7 & $+0.9$ \\
+moe\_seq, HQQ 4-bit & 1059 & \textbf{79.6} & $+2.8$ [$+0.4,+5.2$] \\
+moe\_seq, KL 3.5 bit & 938 & 78.0 & $+1.2$ [$-1.4,+3.8$] \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:mopeq} shows that, before fine-tuning, KL-guided allocation beats uniform quantisation at
+every budget (+1.2 points at 4 bits, +2.2 at 3 bits) and matches uniform 4-bit with 11\% less quantised
+memory at 3.5 bits. The gains point the same way at all budgets but are not individually significant
+on 600 test samples ($p=0.13$ and $0.09$). The allocator protects the vision--language merger, the
+first and last language MLPs and the first vision block, and spends more bits on the vision encoder
+than on the language model; spatial reasoning gains most (+6 points at the 4-bit budget).
+
+The Hessian proxy fails: its plans lose 15--40 points against uniform quantisation, because it rates
+several units as nearly insensitive and sends them to 2 bits, where the true damage (by KL) is 10--50
+times that at 3 bits. Its ranking correlates weakly with the measured KL (Spearman $\rho=0.17$--$0.27$).
+We attribute this to the noisy, low-budget estimate and to the second-order approximation breaking down
+at 2--3 bits, not to the idea of Hessian-aware allocation; with edge-scale compute, a direct KL probe
+of about 20 GPU-minutes is the more reliable signal.
+
+After fine-tuning the picture changes. moe\_seq trained on uniform HQQ 4-bit reaches 79.6\,$\pm$\,0.8,
+significantly above the full-precision model ($p=0.01$) at $2.4\times$ less weight memory (1724 vs
+4213\,MiB) and 1.9 points above the same recipe on NF4. On the KL-guided 3.5-bit base it reaches
+78.0, saving 94\,MiB but losing 1.6 points: as with the fp16 vision encoder above, the adapters absorb
+most of the quantisation error, so a better uniform quantiser helps more than a cleverer allocation.
+HQQ's dequantisation in PyTorch makes inference about twice as slow as NF4 on the T4 (1.0 vs 0.56\,s
+per answer), so the NF4 numbers remain our latency reference.
+
 \section{Conclusion}
 Sequence-level MoE-LoRA lets a 4-bit VLM be trained with several task experts on one T4 GPU and deployed
 as ordinary per-task checkpoints with no accuracy loss and no runtime overhead on a 4\,GB laptop GPU.
@@ -320,12 +385,14 @@ dense LoRA when image tokens are reduced. Both 4-bit adapted models exceed the o
 model with $2.6\times$ less GPU memory. Token-level routing, by contrast, learns little
 task structure and is less accurate. Limitations: three tasks and small training sets (400 per task),
 a single 2B backbone, and task profiles that assume the task is known at deployment.
-Mixed-precision expert quantisation such as MoPEQ~\cite{chitty2025mopeq} gives little here, because our
-experts are 2.3\% of the parameters and are folded away. We expect it to matter when the experts are a
-large share of the weights: pretrained MoE VLMs, much larger or higher-rank experts that must stay
-unfolded, or 10B-scale backbones where a few gigabytes decide whether a model fits on an edge device.
-Sensitivity-guided mixed precision for the base model, for example keeping the vision encoder at higher
-precision, is a second direction, since uniform 4-bit quantisation costs the untuned model 5.2 points.
+With HQQ as the 4-bit quantiser, MoE-LoRA exceeds the full-precision model by 2.8 points at
+$2.4\times$ less weight memory. MoPEQ-style sensitivity-guided mixed precision of the base helps the
+untuned model at equal memory but not the fine-tuned one, and a low-budget Hessian-trace sensitivity
+estimate is unreliable; directly measured KL sensitivity should be preferred on edge-scale compute.
+Expert-level mixed precision as in MoPEQ gives little here, because our experts are 2.3\% of the
+parameters and are folded away. We expect it to matter when experts are a large share of the weights:
+pretrained MoE VLMs, larger experts that must stay unfolded, or 10B-scale backbones where a few
+gigabytes decide whether a model fits on an edge device.
 
 \bibliographystyle{IEEEtran}
 \bibliography{refs}
