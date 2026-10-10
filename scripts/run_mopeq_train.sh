@@ -13,6 +13,10 @@ T=data/v3/test.jsonl
 pip install -q hqq
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+python -c "import torch, sys; sys.exit(0 if torch.cuda.device_count() >= 2 else 1)" || {
+    say "!! needs 2 GPUs (Settings -> Accelerator -> GPU T4 x2); found: $(python -c 'import torch; print(torch.cuda.device_count())')"
+    exit 1; }
+
 fetch() {  # path-suffix -> copies the first match under /kaggle/input to ./path-suffix
     [ -e "$1" ] && return
     local hit; hit=$(find /kaggle/input -path "*/$1" 2>/dev/null | head -n 1)
@@ -34,7 +38,8 @@ if ! python scripts/cache_teacher.py --check > /dev/null 2>&1; then
         CUDA_VISIBLE_DEVICES=$s python scripts/cache_teacher.py --shard $s --num_shards 2 > logs/cache_$s.log 2>&1 &
     done
     wait
-    python scripts/cache_teacher.py --check > /dev/null 2>&1 || { say "!! teacher cache incomplete"; exit 1; }
+    python scripts/cache_teacher.py --check > /dev/null 2>&1 || {
+        say "!! teacher cache incomplete"; tail -n 15 logs/cache_0.log logs/cache_1.log; exit 1; }
 fi
 
 train_eval() { # gpu config seed
