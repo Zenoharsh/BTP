@@ -197,6 +197,17 @@ Identical to the 4th decimal -> no pipeline difference. The dev gap vs NF4 moe_s
 almost entirely chart_qa on 50 dev samples (60-66 vs ~74); on TEST (200 per task) HQQ-4 chart is 76.8
 vs 73.0 for NF4. Dev/test disagreement = small-split variance on one task; TEST is the reported result.
 
+### Paired bootstrap vs moe_seq_hqq4 (TEST, computed locally from paper_data.zip)
+| variant | macro | Δ vs moe_seq_hqq4 [95% CI] | p |
+|---|---|---|---|
+| dense16_vis | 78.6 ± 0.7 | −1.0 [−3.0, +0.9] | 0.857 |
+| moe_seq_mopeq35 | 78.0 ± 0.7 | −1.6 [−3.5, +0.3] | 0.955 |
+| moe_seq_vis | 78.0 ± 0.8 | −1.5 [−3.4, +0.2] | 0.957 |
+Hessian trace estimates: 26 of 89 units non-positive (clamped to 0 -> treated as free to quantise).
+Tie-aware Spearman KL vs Hessian at 3 bit: 0.165.
+NF4 moe_seq / dense16 test predictions were not in the zip (older Kaggle versions), so HQQ-4 vs NF4
+is still a difference of means (+1.9), not a paired test.
+
 ## Other facts used in the paper
 - Trainable parameters: 56.6M (2.317% of 2.442B unquantised) for MoE-LoRA (4 experts, rank 16, 28
   layers); dense16 is a quarter of that. Quantisable base parameters (mopeq units): 1.973B in 89 units
@@ -208,5 +219,5 @@ vs 73.0 for NF4. Dev/test disagreement = small-split variance on one task; TEST 
   moe s0/s1, moe_seq s0).
 
 ## Pending
-- Paired bootstrap of the HQQ / MoPEQ runs vs NF4 moe_seq (needs the NF4 test predictions locally).
+- Paired bootstrap HQQ-4 vs NF4 moe_seq: needs runs/moe_seq_s*/test_preds.jsonl from the run_test version.
 - Optional: Hessian sensitivity in fp32 with more probes (fair MoPEQ-metric comparison).

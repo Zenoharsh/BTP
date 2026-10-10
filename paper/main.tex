@@ -280,7 +280,17 @@ Table~\ref{tab:eff} compares our models with the original unquantised model (fp1
 512\,px), all on the test set. Image resolution sets the number of visual tokens: 440.6 per image at
 512\,px and 241.7 at 256\,px ($-45\%$). For 256\,px we rebuilt the teacher cache at that resolution
 and trained moe\_seq and dense16 with the same recipe (three seeds each; 42 and 36 minutes per run
-instead of about 65).
+instead of about 65). Fig.~\ref{fig:accmem} places every evaluated configuration of this paper on the
+accuracy--memory plane.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figs/acc_vs_memory.pdf}
+\caption{Test macro score versus peak GPU memory during evaluation for all configurations (base models
+without adapters, MoPEQ-style KL plans without adapters, and adapted models with $\pm1$ s.d.\ over three
+seeds). The dotted line marks the unquantised fp16 model, the dashed line the 4\,GB of the GTX~1650.}
+\label{fig:accmem}
+\end{figure}
 
 \begin{table}[t]
 \centering
@@ -397,6 +407,16 @@ moe\_seq, KL 3.5 bit & 938 & 78.0 & $+1.2$ [$-1.4,+3.8$] \\
 \end{tabular}
 \end{table}
 
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figs/mopeq_bits.pdf}
+\caption{Top: measured KL sensitivity of each of the 89 quantisation units at 3 bits (log scale; vision
+blocks, the vision--language merger, then attention and MLP of each language layer). Bottom: bits per
+unit chosen by the exact knapsack at the memory of uniform 4, 3.5 and 3 bits, and by the Hessian proxy
+at 4 bits.}
+\label{fig:mopeqbits}
+\end{figure*}
+
 Table~\ref{tab:mopeq} shows that, before fine-tuning, KL-guided allocation beats uniform quantisation at
 every budget (+1.2 points at 4 bits, +2.2 at 3 bits) and matches uniform 4-bit with 11\% less quantised
 memory at 3.5 bits. The gains point the same way at all budgets but are not individually significant
@@ -406,7 +426,18 @@ than on the language model; spatial reasoning gains most (+6 points at the 4-bit
 
 The Hessian proxy fails: its plans lose 15--40 points against uniform quantisation, because it rates
 several units as nearly insensitive and sends them to 2 bits, where the true damage (by KL) is 10--50
-times that at 3 bits. Its ranking correlates weakly with the measured KL (Spearman $\rho=0.17$--$0.27$).
+times that at 3 bits. Its ranking correlates weakly with the measured KL (Spearman $\rho=0.17$--$0.27$),
+and 26 of the 89 trace estimates are not even positive (Fig.~\ref{fig:klhess}); clamped to zero, these
+units look free to quantise. Fig.~\ref{fig:mopeqbits} shows the resulting plans side by side.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figs/kl_vs_hessian.pdf}
+\caption{Hessian-trace versus measured KL sensitivity of the 89 units at 3 bits. Units whose trace
+estimate is $\le 0$ are drawn at the floor of the plot.}
+\label{fig:klhess}
+\end{figure}
+
 We attribute this to the noisy, low-budget estimate and to the second-order approximation breaking down
 at 2--3 bits, not to the idea of Hessian-aware allocation; with edge-scale compute, a direct KL probe
 of about 20 GPU-minutes is the more reliable signal.
