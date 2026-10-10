@@ -262,9 +262,56 @@ def fig_edge():
     save(fig, "edge_gtx1650")
 
 
+def fig_routing():
+    """Per-layer MI(task; expert), token vs sequence routing (seed 0), and the task->expert shares at
+    the most task-specific layer of sequence routing."""
+    import sys
+    sys.path.insert(0, os.path.abspath("."))
+    from convert import routing_stats
+    runs = [("token routing (moe)", "runs/moe_s0/routing_dev.npz", GRAY),
+            ("sequence routing (moe_seq)", "runs/moe_seq_s0/routing_dev.npz", BLUE)]
+    runs = [(n, routing_stats(f), c) for n, f, c in runs if os.path.exists(f)]
+    if len(runs) < 2:
+        print("skip routing (routing_dev.npz missing)")
+        return
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(FULL, 1.75), gridspec_kw={"width_ratios": [2.3, 1], "wspace": 0.28})
+    for name, st, c in runs:
+        mi = st["mi"]
+        a1.plot(np.arange(len(mi)), mi, color=c, lw=1.5, marker="o", ms=3, label=f"{name}, mean {mi.mean():.2f}")
+    a1.axhline(runs[0][1]["max_mi"], color=MUTED, lw=0.6, ls=(0, (3, 2)))
+    a1.text(27, runs[0][1]["max_mi"], "maximum = log2 3", ha="right", va="bottom", fontsize=6.5, color=MUTED)
+    a1.set_xlabel("language layer")
+    a1.set_ylabel("MI(task; expert) (bits)")
+    a1.set_xlim(-0.5, 27.5)
+    a1.set_ylim(0, 1.7)
+    a1.grid(True, axis="y")
+    a1.legend(loc="lower left", bbox_to_anchor=(0.0, 1.0), frameon=False, ncol=2)
+    st = runs[1][1]
+    l = int(np.argmax(st["mi"]))
+    tasks = st["tasks"]
+    m = np.stack([st["f_task"][t][l] for t in tasks])
+    a2.imshow(m, cmap=matplotlib.colors.LinearSegmentedColormap.from_list("b", ["#f0efec", "#0d366b"]),
+              vmin=0, vmax=1, aspect="auto")
+    for i in range(m.shape[0]):
+        for j in range(m.shape[1]):
+            a2.text(j, i, f"{m[i, j]:.2f}", ha="center", va="center", fontsize=6.5,
+                    color="white" if m[i, j] > 0.55 else INK)
+    a2.set_xticks(range(m.shape[1]))
+    a2.set_xticklabels([f"e{j}" for j in range(m.shape[1])])
+    a2.set_yticks(range(len(tasks)))
+    a2.set_yticklabels([t.replace("_", " ").replace("document ocr", "document").replace("spatial reasoning", "spatial")
+                        .replace("chart qa", "chart") for t in tasks])
+    a2.set_title(f"sequence routing, layer {l}: share of each task per expert", fontsize=7)
+    a2.tick_params(length=0)
+    for sp in a2.spines.values():
+        sp.set_visible(False)
+    save(fig, "routing_mi")
+
+
 if __name__ == "__main__":
     check_scores()
     fig_acc_memory()
     fig_mopeq_bits()
     fig_kl_vs_hessian()
     fig_edge()
+    fig_routing()

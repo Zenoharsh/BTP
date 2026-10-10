@@ -247,7 +247,16 @@ in every seed, although no task label is ever given to the model. In the most sp
 charts, documents and spatial questions go to three different experts in 100\%, 84\% and 94\% of cases.
 Charts and documents often share an expert in other layers, consistent with both requiring text reading.
 Which layers specialise varies between seeds, and some layers collapse to a single expert (usage entropy 0),
-which then acts as a dense LoRA.
+which then acts as a dense LoRA. Fig.~\ref{fig:routing} shows the per-layer picture for seed 0.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figs/routing_mi.pdf}
+\caption{Left: mutual information between task and chosen expert in each of the 28 language layers
+(development set, seed 0). Right: share of each task's prompts sent to each expert in the most
+task-specific layer of sequence-level routing (layer 18).}
+\label{fig:routing}
+\end{figure*}
 
 \subsection{Folding experts into standard checkpoints}
 For moe\_seq, per-task profile checkpoints score 76.9, 78.2 and 77.5 on test for seeds 0--2, against
