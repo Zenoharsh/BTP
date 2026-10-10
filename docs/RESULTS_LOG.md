@@ -5,6 +5,20 @@ depends on chat history. Scores are macro over chart_qa / document_ocr / spatial
 documents, relaxed accuracy for charts, accuracy for VSR). "±" = std over seeds. Δ / CI / p = paired
 bootstrap from `scripts/aggregate.py` (p = P(diff <= 0), one-sided).
 
+## Headline numbers (TEST, 600 samples, 512 px unless noted; details in the sections below)
+| model | macro | peak GPU memory | note |
+|---|---|---|---|
+| fp16 base (original, unquantised) | 76.8 | 4325 MiB | reference |
+| NF4 base (bitsandbytes 4-bit) | 71.6 | 1566 MiB | −5.2 from 4-bit |
+| HQQ 4-bit base | 74.0 | 1712 MiB | −2.8 |
+| dense16 LoRA on NF4 (3 seeds) | 78.4 ± 0.7 | ~1.6 GB | |
+| moe_seq on NF4 (3 seeds) | 77.7 ± 0.9 | ~1.75 GB | MoE ≈ dense (−0.7, n.s.) |
+| **moe_seq on HQQ 4-bit (3 seeds)** | **79.6 ± 0.8** | **1909 MiB** | **+2.8 vs fp16, p 0.011; best overall** |
+| moe_seq on MoPEQ-KL 3.5-bit plan (3 seeds) | 78.0 ± 0.7 | 1815 MiB | +1.2 vs fp16 (n.s.) |
+| moe_seq on NF4 @256 px (3 seeds) | 74.6 ± 1.0 | 1753 MiB | 45% fewer image tokens |
+Task specialisation (dev): MI(task; expert) 0.48 ± 0.05 bits (sequence routing) vs 0.05 (token routing).
+Edge (GTX 1650 4 GB): merged model = base cost (2054 MiB peak, 3.08 s); routed +224 MiB, −24% decode speed.
+
 Setup: Qwen2-VL-2B-Instruct, base frozen in 4-bit NF4 (bitsandbytes, double quant, fp16 compute),
 MoE-LoRA (4 experts, rank 16, top-1) in all 28 language MLPs, KD from the fp16 model (T=2, top-50 +
 tail bucket), 2 epochs, best epoch on dev. 1200 / 150 / 600 train / dev / test samples (400/50/200 per
@@ -135,11 +149,13 @@ KL sensitivity (32 calibration samples), exact knapsack at the memory of uniform
 References: fp16 76.8 · bitsandbytes NF4 71.6 (1390 MiB weights). HQQ latency on T4 (PyTorch backend)
 ~1.0-1.3 s vs 0.56 s NF4: accuracy/memory experiment, not a speed one.
 Same memory: kl_4 vs u4 +1.2 (spatial +6.0) · kl_3 vs u3 +2.2 · kl_3.5 = u4 (74.0) with 11% less
-quantised memory (938 vs 1059 MiB). Paired bootstrap mixed vs uniform not computed yet.
+quantised memory (938 vs 1059 MiB). Paired bootstrap: see the Hessian subsection below.
 Most sensitive units (KL @2 bit): vis.merger 9.3e-2, lm.1.mlp 8.6e-2, lm.27.mlp 5.2e-2, vis.0 5.1e-2,
 lm.0.attn 2.8e-2, then vision blocks 4/29/7/20/6, lm.14.attn, lm.3.attn (first/last layers and the
 vision->language merger).
-The Hessian (MoPEQ metric) plans did not appear: the Hessian sensitivity step failed (log pending).
+Sensitivity cost: KL probe ~20 min on 2x T4 (32 calibration samples, 89 units x 4 bit-widths). The
+first Hessian attempt (exact double-backprop HVPs) ran out of memory on a T4 (14.3 GiB); rerun with
+finite-difference HVPs below.
 
 ### MoPEQ Hessian metric (Hutchinson, finite-difference HVPs in fp16, 16 calib x 2 probes, 256-px calibration)
 | plan | avg bits (vision / language) | units per bits | macro | Δ vs hqq_u4 at same memory |
@@ -168,5 +184,17 @@ Dev best: hqq4 79.22 / 81.22 / 82.84 · mopeq35 78.98 / 78.31 / 81.69 (NF4 moe_s
 Reference: moe_seq on bitsandbytes NF4 77.7 ± 0.9 (test), fp16 base 76.8 (4325 MiB peak).
 Not yet bootstrapped: hqq4 / mopeq35 vs NF4 moe_seq (NF4 predictions were not attached).
 
+## Other facts used in the paper
+- Trainable parameters: 56.6M (2.317% of 2.442B unquantised) for MoE-LoRA (4 experts, rank 16, 28
+  layers); dense16 is a quarter of that. Quantisable base parameters (mopeq units): 1.973B in 89 units
+  (32 vision blocks, vision merger, 28 x language attention / MLP).
+- Training time per run on one T4 (2 epochs, 1200 samples, grad accum 8): NF4 dense16 60-64 min, NF4
+  moe/moe_seq 66-69 min, dense64 66 min, HQQ-4 moe_seq 83 min, MoPEQ-3.5 moe_seq 89 min; @256 px 36-42 min.
+- Teacher (fp16) KD cache: built once, ~30 min on 2x T4.
+- Exact reproducibility: re-running identical seeds gave identical dev scores (dense16 s0/s1, dense64,
+  moe s0/s1, moe_seq s0).
+
 ## Pending
-- Hessian sensitivity rerun; adapters trained on a mixed plan vs uniform.
+- Dev re-check of the HQQ runs (run_devcheck.sh): in-training dev score vs re-evaluated best/ adapters.
+- Paired bootstrap of the HQQ / MoPEQ runs vs NF4 moe_seq (needs the NF4 test predictions locally).
+- Optional: Hessian sensitivity in fp32 with more probes (fair MoPEQ-metric comparison).
