@@ -123,5 +123,23 @@ Reading: vs the all-NF4 runs (dense16 78.4, moe_seq 77.7) keeping vision fp16 ad
 ~+950 MiB -> the adapters already absorb the quantisation loss; uniform NF4 + adapters is the better
 deployment point.
 
+## MoPEQ-style mixed precision of the base (TEST, run_mopeq.sh, HQQ group 64, base model, no adapters)
+KL sensitivity (32 calibration samples), exact knapsack at the memory of uniform 3 / 3.5 / 4 bit.
+| plan | avg bits (vision / language) | units per bits | quantised MiB | weights | peak | macro | chart | doc | spatial | Δ vs fp16 [95% CI] |
+|---|---|---|---|---|---|---|---|---|---|---|
+| hqq_u4 | 4.00 (4.00 / 4.00) | 4:89 | 1059 | 1526 | 1712 | 74.0 | 76.0 | 83.4 | 62.5 | −2.8 [−5.1, −0.6] |
+| hqq_kl_4 | 3.99 (4.21 / 3.87) | 3:8 4:75 8:6 | 1055 | 1529 | 1716 | 75.2 | 74.5 | 82.5 | 68.5 | −1.6 [−4.0, +0.7] |
+| hqq_kl_3.5 | 3.49 (3.97 / 3.24) | 3:33 4:54 8:2 | 938 | 1436 | 1622 | 74.0 | 73.0 | 80.5 | 68.5 | −2.8 [−5.9, +0.4] |
+| hqq_u3 | 3.00 | 3:89 | 823 | 1321 | 1508 | 66.8 | 64.0 | 73.0 | 63.5 | −10.0 [−13.8, −6.0] |
+| hqq_kl_3 | 2.99 (3.32 / 2.82) | 2:10 3:56 4:23 | 821 | 1320 | 1506 | 69.0 | 68.5 | 75.5 | 63.0 | −7.8 [−11.5, −4.1] |
+References: fp16 76.8 · bitsandbytes NF4 71.6 (1390 MiB weights). HQQ latency on T4 (PyTorch backend)
+~1.0-1.3 s vs 0.56 s NF4: accuracy/memory experiment, not a speed one.
+Same memory: kl_4 vs u4 +1.2 (spatial +6.0) · kl_3 vs u3 +2.2 · kl_3.5 = u4 (74.0) with 11% less
+quantised memory (938 vs 1059 MiB). Paired bootstrap mixed vs uniform not computed yet.
+Most sensitive units (KL @2 bit): vis.merger 9.3e-2, lm.1.mlp 8.6e-2, lm.27.mlp 5.2e-2, vis.0 5.1e-2,
+lm.0.attn 2.8e-2, then vision blocks 4/29/7/20/6, lm.14.attn, lm.3.attn (first/last layers and the
+vision->language merger).
+The Hessian (MoPEQ metric) plans did not appear: the Hessian sensitivity step failed (log pending).
+
 ## Pending
-- run_mopeq.sh (MoPEQ-style sensitivity-guided mixed precision vs uniform HQQ 3/4-bit, TEST).
+- Hessian sensitivity rerun; adapters trained on a mixed plan vs uniform.
