@@ -208,6 +208,15 @@ Tie-aware Spearman KL vs Hessian at 3 bit: 0.165.
 NF4 moe_seq / dense16 test predictions were not in the zip (older Kaggle versions), so HQQ-4 vs NF4
 is still a difference of means (+1.9), not a paired test.
 
+### Full paired bootstrap on TEST with the NF4 predictions (computed locally, newnb Version 2 output)
+vs NF4 moe_seq (77.7): moe_seq_hqq4 +1.9 [+0.0, +3.8] p 0.023 · dense16 +0.7 [−0.4, +1.7] p 0.103 ·
+dense64 +0.4 [−1.5, +2.5] · moe −0.7 [−2.1, +0.7] · moe_seq_mopeq35 +0.3 [−1.7, +2.3] · moe_seq_vis +0.3
+[−1.0, +1.6] · dense16_vis +0.8 [−0.6, +2.2] · fp16 base −0.9 [−3.2, +1.4].
+vs fp16 base (76.8): dense16 +1.6 [−0.8, +4.0] p 0.095 · moe_seq +0.9 [−1.4, +3.2] p 0.215 · moe +0.2
+[−2.1, +2.6] · dense64 +1.4 [−1.5, +4.1] · moe_seq_hqq4 +2.8 [+0.4, +5.2] p 0.011 (only significant one).
+vs dense16 (78.4): moe_seq_hqq4 +1.2 [−0.6, +3.1] p 0.103 · moe_seq_mopeq35 −0.4 · moe_seq_vis −0.4.
+Routing MI (dev, all seeds): sequence routing 0.48 bits mean (3 seeds), token routing 0.05 (2 seeds).
+
 ## Other facts used in the paper
 - Trainable parameters: 56.6M (2.317% of 2.442B unquantised) for MoE-LoRA (4 experts, rank 16, 28
   layers); dense16 is a quarter of that. Quantisable base parameters (mopeq units): 1.973B in 89 units
@@ -219,5 +228,4 @@ is still a difference of means (+1.9), not a paired test.
   moe s0/s1, moe_seq s0).
 
 ## Pending
-- Paired bootstrap HQQ-4 vs NF4 moe_seq: needs runs/moe_seq_s*/test_preds.jsonl from the run_test version.
 - Optional: Hessian sensitivity in fp32 with more probes (fair MoPEQ-metric comparison).

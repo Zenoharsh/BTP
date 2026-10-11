@@ -263,30 +263,35 @@ def fig_edge():
 
 
 def fig_routing():
-    """Per-layer MI(task; expert), token vs sequence routing (seed 0), and the task->expert shares at
-    the most task-specific layer of sequence routing."""
+    """Per-layer MI(task; expert): token vs sequence routing (mean over seeds, band = min..max), and
+    the task->expert shares at the most task-specific layer of sequence routing (seed 0)."""
     import sys
     sys.path.insert(0, os.path.abspath("."))
     from convert import routing_stats
-    runs = [("token routing (moe)", "runs/moe_s0/routing_dev.npz", GRAY),
-            ("sequence routing (moe_seq)", "runs/moe_seq_s0/routing_dev.npz", BLUE)]
-    runs = [(n, routing_stats(f), c) for n, f, c in runs if os.path.exists(f)]
-    if len(runs) < 2:
+    groups = [("token routing (moe)", "runs/moe_s[0-9]/routing_dev.npz", GRAY),
+              ("sequence routing (moe_seq)", "runs/moe_seq_s[0-9]/routing_dev.npz", BLUE)]
+    groups = [(n, [routing_stats(f) for f in sorted(glob.glob(g))], c) for n, g, c in groups]
+    if any(not sts for _, sts, _ in groups):
         print("skip routing (routing_dev.npz missing)")
         return
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(FULL, 1.75), gridspec_kw={"width_ratios": [2.3, 1], "wspace": 0.28})
-    for name, st, c in runs:
-        mi = st["mi"]
-        a1.plot(np.arange(len(mi)), mi, color=c, lw=1.5, marker="o", ms=3, label=f"{name}, mean {mi.mean():.2f}")
-    a1.axhline(runs[0][1]["max_mi"], color=MUTED, lw=0.6, ls=(0, (3, 2)))
-    a1.text(27, runs[0][1]["max_mi"], "maximum = log2 3", ha="right", va="bottom", fontsize=6.5, color=MUTED)
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(FULL, 1.75), gridspec_kw={"width_ratios": [2.3, 1], "wspace": 0.32})
+    for name, sts, c in groups:
+        mi = np.stack([st["mi"] for st in sts])
+        x = np.arange(mi.shape[1])
+        if len(sts) > 1:
+            a1.fill_between(x, mi.min(0), mi.max(0), color=c, alpha=0.18, linewidth=0)
+        a1.plot(x, mi.mean(0), color=c, lw=1.5, marker="o", ms=3,
+                label=f"{name.split(' (')[0]}, mean {mi.mean():.2f} bits ({len(sts)} seeds)")
+    mx = groups[0][1][0]["max_mi"]
+    a1.axhline(mx, color=MUTED, lw=0.6, ls=(0, (3, 2)))
+    a1.text(27, mx, "maximum = log2 3", ha="right", va="bottom", fontsize=6.5, color=MUTED)
     a1.set_xlabel("language layer")
     a1.set_ylabel("MI(task; expert) (bits)")
     a1.set_xlim(-0.5, 27.5)
     a1.set_ylim(0, 1.7)
     a1.grid(True, axis="y")
     a1.legend(loc="lower left", bbox_to_anchor=(0.0, 1.0), frameon=False, ncol=2)
-    st = runs[1][1]
+    st = groups[1][1][0]
     l = int(np.argmax(st["mi"]))
     tasks = st["tasks"]
     m = np.stack([st["f_task"][t][l] for t in tasks])
@@ -299,9 +304,9 @@ def fig_routing():
     a2.set_xticks(range(m.shape[1]))
     a2.set_xticklabels([f"e{j}" for j in range(m.shape[1])])
     a2.set_yticks(range(len(tasks)))
-    a2.set_yticklabels([t.replace("_", " ").replace("document ocr", "document").replace("spatial reasoning", "spatial")
-                        .replace("chart qa", "chart") for t in tasks])
-    a2.set_title(f"sequence routing, layer {l}: share of each task per expert", fontsize=7)
+    a2.set_yticklabels([{"chart_qa": "chart", "document_ocr": "document", "spatial_reasoning": "spatial"}.get(t, t)
+                        for t in tasks])
+    a2.set_title(f"sequence routing, seed 0, layer {l}", fontsize=7)
     a2.tick_params(length=0)
     for sp in a2.spines.values():
         sp.set_visible(False)
