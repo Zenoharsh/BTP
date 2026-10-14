@@ -106,9 +106,7 @@ base uniformly and leave expert precision unchanged.
 Transformers~\cite{fedus2022switch} route tokens to experts with load-balancing losses; router
 $z$-losses~\cite{zoph2022stmoe} stabilise training. Mixtures of LoRA experts apply the idea to
 adapters~\cite{zadouri2023molora,dou2023loramoe}. These works route at token level and keep the router
-at inference. We route at sequence level and fold experts away for deployment.
-\textbf{Distillation.} We use temperature-scaled knowledge distillation~\cite{hinton2015distilling} from
-the unquantised model to the 4-bit student.
+at inference. We route at sequence level and fold experts away for deployment. We distil~\cite{hinton2015distilling} from the unquantised model into the 4-bit student.
 
 \section{Method}
 \begin{figure*}[t]
@@ -229,8 +227,7 @@ routing reaches 0.526, 0.469 and 0.436 bits, roughly ten times more in every see
 never sees a task label. In the most specialised layer of seed 0,
 charts, documents and spatial questions go to three different experts in 100\%, 84\% and 94\% of cases.
 Charts and documents often share an expert in other layers, consistent with both requiring text reading.
-Which layers specialise varies between seeds, and some layers collapse to a single expert (usage entropy 0),
-which then acts as a dense LoRA. Fig.~\ref{fig:routing} shows the per-layer picture over all seeds.
+Which layers specialise varies between seeds; some collapse to one expert and act as a dense LoRA. Fig.~\ref{fig:routing} shows the per-layer picture over all seeds.
 
 \begin{figure*}[t]
 \centering
@@ -244,8 +241,7 @@ task-specific layer of sequence-level routing (layer 18).}
 \subsection{Folding experts into standard checkpoints}
 For moe\_seq, per-task profile checkpoints score 76.9, 78.2 and 77.5 on test for seeds 0--2, against
 76.9, 78.7 and 77.6 for the routed models (mean $-0.2$). A single full merge without task information loses
-0.7 points on the development set (83.9 vs 84.6). Because each profile is a standard Qwen2-VL checkpoint,
-it needs no custom inference code.
+0.7 points on dev (83.9 vs 84.6). Each profile is a standard Qwen2-VL checkpoint.
 
 \subsection{Edge deployment}
 \begin{table}[t]
@@ -326,14 +322,11 @@ Halving the image budget is harder. At 256\,px document OCR falls by about 10 po
 since small text becomes unreadable, while spatial reasoning is unaffected. Sequence-level MoE-LoRA
 remains within noise of the unquantised model ($-2.2$ points, CI includes zero) and is 1.2 points
 ahead of dense16 at the same resolution (higher on all three tasks). Dense16 is significantly below
-the unquantised model. At full resolution the two adapters were tied, so the extra capacity of task
-experts helps most when the input is compressed. Three seeds are too few to call this 1.2-point gap
-significant on its own.
+the unquantised model. Task experts seem to help most when the input is compressed, though three seeds
+are too few to call the 1.2-point gap significant.
 
-On the T4, 4-bit inference is not faster than fp16 (0.49--0.56\,s per answer vs 0.50\,s), since the
-GPU has ample memory bandwidth and dequantisation adds work. The savings are in memory and, at 256\,px,
-in image tokens. On the 4\,GB GTX~1650 the comparison is decided by memory: the unquantised model does
-not fit, while our models run in 2.0\,GB.
+On the T4, 4-bit inference is no faster than fp16 (0.49--0.56 vs 0.50\,s per answer); the gain is
+memory, which is what decides whether a model runs on the 4\,GB GTX~1650.
 
 \subsection{Where the 4-bit loss comes from}
 Table~\ref{tab:vis} keeps one component of the base in fp16 and quantises the rest to NF4 (test, 512\,px).
@@ -442,21 +435,26 @@ HQQ's dequantisation in PyTorch makes inference about twice as slow as NF4 on th
 per answer), so the NF4 numbers remain our latency reference.
 
 \section{Conclusion}
-Sequence-level MoE-LoRA lets a 4-bit VLM be trained with several task experts on one T4 GPU and deployed
-as ordinary per-task checkpoints with no accuracy loss and no runtime overhead on a 4\,GB laptop GPU.
-It matches, but does not exceed, a dense LoRA of the same rank; its benefits are modularity, label-free
-task specialisation at zero deployment cost, and better robustness when image tokens are reduced. With an HQQ base the
-4-bit adapted model is significantly more accurate than the original full-precision model ($+2.8$
-points) while cutting peak GPU memory from 4.2\,GB to 1.9\,GB; with NF4 it is on par ($+0.9$ to $+1.6$, not significant). MoPEQ-style mixed precision helps the untuned base at equal memory but not the
-fine-tuned model, and directly measured KL sensitivity is more reliable than a low-budget Hessian
-estimate on edge-scale compute.
-
-Limitations: three tasks with 400 training samples each, a single 2B backbone, task profiles that assume
-the task is known at deployment, and HQQ inference that is slower than NF4 in PyTorch. Expert-level
-mixed precision as in MoPEQ gives little here, because our experts are 2.3\% of the parameters and are
-folded away. We expect it to matter when experts are a large share of the weights: pretrained MoE VLMs,
-larger experts that must stay unfolded, or 10B-scale backbones where a few gigabytes decide whether a
-model fits on an edge device.
+Our sequence-level MoE-LoRA, trained on one T4 GPU, achieves on held-out test data:
+\begin{itemize}\setlength{\itemsep}{0pt}
+\item \emph{Better than full precision at less than half the memory:} on an HQQ 4-bit base, MoE-LoRA
+scores 79.6 vs 76.8 for the original fp16 model ($+2.8$, $p=0.01$), with peak GPU memory cut from
+4.2\,GB to 1.9\,GB; HQQ itself adds 1.9 points over NF4 ($p=0.02$). Only ours fits a 4\,GB GPU.
+\item \emph{Quantisation loss recovered:} adapters lift the 4-bit base from 71.6 to 77.7--79.6, and
+spatial reasoning from 60.5 to 75.8--78.2.
+\item \emph{Experts that find the tasks on their own:} sequence-level routing carries 0.48 bits of task
+information against 0.05 for token-level routing, with no task labels, at the accuracy of dense LoRA.
+\item \emph{Zero deployment overhead:} folded checkpoints lose 0.2 points and run on the GTX~1650 at
+exactly the base model's cost (2054\,MiB, 18.8 tokens/s); keeping the router would cost 11\% more
+memory and 24\% slower decoding. fp32 compute cuts its time to first token from 12.8 to 3.0\,s.
+\item \emph{Fewer image tokens:} at 256\,px (45\% fewer tokens, about 35\% shorter training) MoE-LoRA
+stays within noise of the fp16 model and 1.2 points ahead of dense LoRA.
+\item \emph{Where precision matters:} the language model causes 3.2 and the vision encoder 1.7 of the
+5.2 points lost to 4-bit; KL-guided per-layer bits help the untuned model by 1.2--2.2 points, a cheap
+Hessian estimate fails, and after fine-tuning a good uniform quantiser is the best choice.
+\end{itemize}
+Limitations: three tasks of 400 training samples, one 2B backbone, task profiles that assume the task is
+known, and HQQ being slower than NF4 in PyTorch.
 
 \bibliographystyle{IEEEtran}
 \bibliography{refs}
