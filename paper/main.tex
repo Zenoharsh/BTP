@@ -251,7 +251,8 @@ it needs no custom inference code.
 \subsection{Edge deployment}
 \begin{table}[t]
 \centering
-\caption{GTX 1650 (4\,GB) laptop GPU, 4-bit weights, fp32 compute, batch 1.}
+\caption{GTX 1650 (4\,GB) laptop GPU, 4-bit weights, fp32 compute, batch 1. Folded models have the
+adapters merged into the base weights, so they are identical in size to the base model.}
 \label{tab:edge}
 \setlength{\tabcolsep}{4pt}
 \begin{tabular}{lccc}
