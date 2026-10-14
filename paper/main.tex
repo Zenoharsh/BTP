@@ -206,9 +206,8 @@ moe\_seq (3) & 73.0 & 84.4 & 75.8 & 77.7\scriptsize{$\pm$0.9} & $-0.7$ [$-1.7,+0
 Table~\ref{tab:main} shows that every adapter improves the 4-bit base model by 6--7 points. The
 sequence-level MoE is statistically indistinguishable from dense LoRA, while token-level routing is
 measurably worse ($-1.4$, CI upper bound 0.0). A four times larger dense adapter (dense64) brings no gain,
-so adapter capacity does not limit accuracy in this setting. On the development set the ordering of
-dense16 and moe\_seq was reversed (84.6 vs 84.8), a difference that did not survive on unseen data; we
-therefore make no claim that MoE improves accuracy.
+so adapter capacity does not limit accuracy in this setting. On the development set moe\_seq was ahead (84.8 vs
+84.6), which did not hold on test, so we make no claim that MoE improves accuracy.
 
 \begin{figure}[t]
 \centering
@@ -431,9 +430,8 @@ times that at 3 bits. Its ranking correlates weakly with the measured KL (Spearm
 and 26 of the 89 trace estimates are not even positive; clamped to zero, these units look free to
 quantise. Fig.~\ref{fig:mopeqbits} shows the resulting plans side by side.
 
-We attribute this to the noisy, low-budget estimate and to the second-order approximation breaking down
-at 2--3 bits, not to the idea of Hessian-aware allocation; with edge-scale compute, a direct KL probe
-of about 20 GPU-minutes is the more reliable signal.
+We blame the noisy, low-budget estimate and the second-order approximation at 2--3 bits rather than
+Hessian-aware allocation itself; on edge-scale compute, a 20-minute direct KL probe is more reliable.
 
 After fine-tuning the picture changes. moe\_seq trained on uniform HQQ 4-bit reaches 79.6\,$\pm$\,0.8,
 significantly above the full-precision model ($p=0.01$) at $2.4\times$ less weight memory (1724 vs
@@ -447,8 +445,7 @@ per answer), so the NF4 numbers remain our latency reference.
 Sequence-level MoE-LoRA lets a 4-bit VLM be trained with several task experts on one T4 GPU and deployed
 as ordinary per-task checkpoints with no accuracy loss and no runtime overhead on a 4\,GB laptop GPU.
 It matches, but does not exceed, a dense LoRA of the same rank; its benefits are modularity, label-free
-task specialisation at zero deployment cost, and better robustness when image tokens are reduced.
-Token-level routing, by contrast, learns little task structure and is less accurate. With an HQQ base the
+task specialisation at zero deployment cost, and better robustness when image tokens are reduced. With an HQQ base the
 4-bit adapted model is significantly more accurate than the original full-precision model ($+2.8$
 points) at $2.4\times$ less weight memory; with NF4 it is on par ($+0.9$ to $+1.6$, not significant). MoPEQ-style mixed precision helps the untuned base at equal memory but not the
 fine-tuned model, and directly measured KL sensitivity is more reliable than a low-budget Hessian
