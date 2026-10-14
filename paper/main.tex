@@ -55,7 +55,7 @@ token-level experts. Since every request uses a single expert, the experts fold 
 checkpoints with no loss: on a 4\,GB GTX~1650 laptop GPU the folded model costs exactly what the 4-bit
 base costs (2.05\,GB peak, 18.8 tokens/s), while keeping the router adds 11\% memory and slows decoding
 by 24\%. With HQQ 4-bit quantisation, MoE-LoRA reaches 79.6 points, 2.8 above the original
-full-precision model (95\% CI [+0.4, +5.2]) with 2.4\texttimes{} less weight memory; the
+full-precision model (95\% CI [+0.4, +5.2]), while peak GPU memory drops from 4.3\,GB to 1.9\,GB; the
 full-precision model does not even fit on the 4\,GB GPU. We also tried MoPEQ-style per-layer bit
 allocation. It helps the untuned model a little at every memory budget (+1.2 to +2.2 points, not
 significant on its own), stops helping once the adapters are trained, and goes badly wrong when
@@ -93,7 +93,7 @@ mutual information) and that its experts fold into plain per-task checkpoints, w
 laptop GPU with no overhead over the base model.
 \item A memory--accuracy study against the unquantised model, covering per-component and MoPEQ-style
 per-layer mixed precision: with an HQQ base the adapted model is significantly more accurate than fp16
-($+2.8$ points, $p=0.01$) at $2.4\times$ less weight memory.
+($+2.8$ points, $p=0.01$) with peak GPU memory cut from 4.3\,GB to 1.9\,GB.
 \end{itemize}
 
 \section{Related Work}
@@ -447,7 +447,7 @@ as ordinary per-task checkpoints with no accuracy loss and no runtime overhead o
 It matches, but does not exceed, a dense LoRA of the same rank; its benefits are modularity, label-free
 task specialisation at zero deployment cost, and better robustness when image tokens are reduced. With an HQQ base the
 4-bit adapted model is significantly more accurate than the original full-precision model ($+2.8$
-points) at $2.4\times$ less weight memory; with NF4 it is on par ($+0.9$ to $+1.6$, not significant). MoPEQ-style mixed precision helps the untuned base at equal memory but not the
+points) while cutting peak GPU memory from 4.3\,GB to 1.9\,GB; with NF4 it is on par ($+0.9$ to $+1.6$, not significant). MoPEQ-style mixed precision helps the untuned base at equal memory but not the
 fine-tuned model, and directly measured KL sensitivity is more reliable than a low-budget Hessian
 estimate on edge-scale compute.
 
