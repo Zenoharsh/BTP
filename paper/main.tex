@@ -9,6 +9,11 @@
 \usepackage{xcolor}
 \usepackage{booktabs,multirow}
 \usepackage[hidelinks]{hyperref}
+\usepackage{orcidlink}
+% second row of author blocks, centred like the first
+\makeatletter
+\newcommand{\linebreakand}{\end{@IEEEauthorhalign}\hfill\mbox{}\par\mbox{}\hfill\begin{@IEEEauthorhalign}}
+\makeatother
 \newcommand{\tbd}[1]{\textcolor{red}{[#1]}}
 % slightly tighter float spacing so all figures fit the 6-page limit
 \setlength{\textfloatsep}{8pt plus 2pt minus 2pt}
@@ -19,29 +24,29 @@
 
 \title{Train as Experts, Deploy as Dense: Sequence-Level Mixture-of-LoRA Adaptation of a 4-bit Vision-Language Model for Edge Devices}
 
-\author{\IEEEauthorblockN{Harsh Raj}
+\author{\IEEEauthorblockN{1\textsuperscript{st} Harsh Raj\,\orcidlink{0009-0000-3091-1946}}
 \IEEEauthorblockA{\textit{Instrumentation \& Control Engineering Dept.} \\
 \textit{Netaji Subhas University of Technology}\\
 New Delhi, India-110078 \\
 harsh.raj.ug23@nsut.ac.in}
 \and
-\IEEEauthorblockN{Rumeshi Mittal}
+\IEEEauthorblockN{2\textsuperscript{nd} Saurav Kumar\,\orcidlink{0009-0003-2525-1316}}
+\IEEEauthorblockA{\textit{Instrumentation \& Control Engineering Dept.} \\
+\textit{Netaji Subhas University of Technology}\\
+New Delhi, India-110078 \\
+saurav.kumar\_ug23@nsut.ac.in}
+\linebreakand
+\IEEEauthorblockN{3\textsuperscript{rd} Rumeshi Mittal\,\orcidlink{0009-0001-0925-6542}}
 \IEEEauthorblockA{\textit{Instrumentation \& Control Engineering Dept.} \\
 \textit{Netaji Subhas University of Technology}\\
 New Delhi, India-110078 \\
 rumeshi.mittal.ug23@nsut.ac.in}
 \and
-\IEEEauthorblockN{Saurav Kumar}
+\IEEEauthorblockN{4\textsuperscript{th} Vicky Suri}
 \IEEEauthorblockA{\textit{Instrumentation \& Control Engineering Dept.} \\
 \textit{Netaji Subhas University of Technology}\\
 New Delhi, India-110078 \\
-saurav.kumar\_ug23@nsut.ac.in}
-\and
-\IEEEauthorblockN{Vicky Suri}
-\IEEEauthorblockA{\textit{Instrumentation \& Control Engineering Dept.} \\
-\textit{Netaji Subhas University of Technology}\\
-New Delhi, India-110078 \\
-\tbd{email}}
+vickysuri@nsut.ac.in}
 }
 
 \maketitle
