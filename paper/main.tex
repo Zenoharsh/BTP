@@ -8,7 +8,8 @@
 \usepackage{textcomp}
 \usepackage{xcolor}
 \usepackage{booktabs,multirow}
-\usepackage[hidelinks]{hyperref}
+% no hyperref: EDAS rejects PDF links and bookmarks
+\usepackage{url}
 % second row of author blocks, centred like the first
 \makeatletter
 \newcommand{\linebreakand}{\end{@IEEEauthorhalign}\hfill\mbox{}\par\vspace{-4pt}\mbox{}\hfill\begin{@IEEEauthorhalign}}
@@ -23,26 +24,31 @@
 
 \title{Train as Experts, Deploy as Dense: Sequence-Level Mixture-of-LoRA Adaptation of a 4-bit Vision-Language Model for Edge Devices}
 
+% Double-blind review copy: compile with  pdflatex "\def\blindreview{}\input{main}"
+\ifdefined\blindreview
+\author{\IEEEauthorblockN{Anonymous Authors}
+\IEEEauthorblockA{Affiliation withheld for double-blind review}}
+\else
 \author{\IEEEauthorblockN{\textbf{Harsh Raj}\textsuperscript{1}}
 \IEEEauthorblockA{Instrumentation \& Control Engineering Department \\
 Netaji Subhas University of Technology \\
 New Delhi, India-110078 \\
 harsh.raj.ug23@nsut.ac.in \\
-\underline{\href{https://orcid.org/0009-0000-3091-1946}{0009-0000-3091-1946}}}
+\underline{0009-0000-3091-1946}}
 \and
 \IEEEauthorblockN{\textbf{Saurav Kumar}\textsuperscript{2}}
 \IEEEauthorblockA{Instrumentation \& Control Engineering Department \\
 Netaji Subhas University of Technology \\
 New Delhi, India-110078 \\
 saurav.kumar\_ug23@nsut.ac.in \\
-\underline{\href{https://orcid.org/0009-0003-2525-1316}{0009-0003-2525-1316}}}
+\underline{0009-0003-2525-1316}}
 \linebreakand
 \IEEEauthorblockN{\textbf{Rumeshi Mittal}\textsuperscript{3}}
 \IEEEauthorblockA{Instrumentation \& Control Engineering Department \\
 Netaji Subhas University of Technology \\
 New Delhi, India-110078 \\
 rumeshi.mittal.ug23@nsut.ac.in \\
-\underline{\href{https://orcid.org/0009-0001-0925-6542}{0009-0001-0925-6542}}}
+\underline{0009-0001-0925-6542}}
 \and
 \IEEEauthorblockN{\textbf{Vicky Suri}\textsuperscript{4}}
 \IEEEauthorblockA{Instrumentation \& Control Engineering Department \\
@@ -50,6 +56,7 @@ Netaji Subhas University of Technology \\
 New Delhi, India-110078 \\
 vickysuri@nsut.ac.in}
 }
+\fi
 \IEEEaftertitletext{\vspace{-1.6\baselineskip}}
 
 \maketitle
