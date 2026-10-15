@@ -10,6 +10,10 @@
 \usepackage{booktabs,multirow}
 \usepackage[hidelinks]{hyperref}
 \newcommand{\tbd}[1]{\textcolor{red}{[#1]}}
+% slightly tighter float spacing so all figures fit the 6-page limit
+\setlength{\textfloatsep}{8pt plus 2pt minus 2pt}
+\setlength{\floatsep}{6pt plus 2pt minus 2pt}
+\setlength{\dbltextfloatsep}{8pt plus 2pt minus 2pt}
 
 \begin{document}
 
@@ -99,9 +103,8 @@ per-layer mixed precision: with an HQQ base the adapted model is significantly m
 \section{Related Work}
 \textbf{Parameter-efficient adaptation.} LoRA~\cite{hu2022lora} learns low-rank updates to frozen
 weights; QLoRA~\cite{dettmers2023qlora} trains them on top of a 4-bit NF4 base, which we adopt. MoPEQ~\cite{chitty2025mopeq}
-assigns mixed bit widths to the experts of large pretrained MoE VLMs by sensitivity. Our experts are
-small adapters (2.3\% of parameters) that are folded into the base for deployment, so we quantise the
-base uniformly and leave expert precision unchanged.
+assigns mixed bit widths to the experts of large pretrained MoE VLMs by sensitivity; our small experts
+are folded away (Section~\ref{sec:concl}), so we keep them in full precision and study mixed precision of the base.
 \textbf{Mixture of experts.} Sparsely gated MoE layers~\cite{shazeer2017moe} and Switch
 Transformers~\cite{fedus2022switch} route tokens to experts with load-balancing losses; router
 $z$-losses~\cite{zoph2022stmoe} stabilise training. Mixtures of LoRA experts apply the idea to
@@ -265,22 +268,20 @@ dense16, folded & 2054\,MiB & 3.08\,s & 18.7 tok/s \\
 Table~\ref{tab:edge} shows that a folded checkpoint has exactly the memory and speed of the base model,
 while keeping the router costs 11\% more memory and 24\% slower decoding. About 2.9\,s of the 3.1\,s
 latency is the prefill pass, dominated by the vision encoder, so the number of image tokens is the main
-lever for latency. The fp16 model cannot be loaded on this GPU: its 4.1\,GB of weights exceed the 4\,GB of VRAM. On the GTX~1650,
-which has no tensor cores, fp16 matrix multiplication is about five times slower than fp32; computing in
-fp32 with 4-bit weights reduces time to first token from 12.8\,s to 3.0\,s at the same accuracy for
-0.5\,GB more memory.
+lever for latency. The fp16 model's 4.1\,GB of weights do not fit this GPU's 4\,GB. Without tensor cores, fp16 matrix
+multiplication here is about five times slower than fp32, so fp32 compute with 4-bit weights cuts time
+to first token from 12.8 to 3.0\,s at equal accuracy for 0.5\,GB more memory.
 
 \subsection{Accuracy versus memory and resolution}
-Table~\ref{tab:eff} compares our models with the original unquantised model (fp16 weights and compute,
-512\,px), all on the test set. Image resolution sets the number of visual tokens: 440.6 per image at
-512\,px and 241.7 at 256\,px ($-45\%$). For 256\,px we rebuilt the teacher cache at that resolution
-and trained moe\_seq and dense16 with the same recipe (three seeds each; 42 and 36 minutes per run
-instead of about 65). Fig.~\ref{fig:accmem} places every evaluated configuration of this paper on the
-accuracy--memory plane.
+Table~\ref{tab:eff} compares our models with the unquantised model (fp16 weights and compute, 512\,px)
+on the test set; Fig.~\ref{fig:accmem} places every evaluated configuration on the accuracy--memory
+plane. A 512\,px image gives 440.6 visual tokens, a 256\,px one 241.7 ($-45\%$). For 256\,px we rebuilt
+the teacher cache and trained moe\_seq and dense16 with the same recipe (three seeds; 42 and 36 minutes
+per run instead of about 65).
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\columnwidth]{figs/acc_vs_memory.pdf}
+\includegraphics[width=0.9\columnwidth]{figs/acc_vs_memory.pdf}
 \caption{Test macro score versus peak GPU memory during evaluation for all configurations (base models
 without adapters, MoPEQ-style KL plans without adapters, and adapted models with $\pm1$ s.d.\ over three
 seeds). The dotted line marks the unquantised fp16 model, the dashed line the 4\,GB of the GTX~1650.}
@@ -320,9 +321,8 @@ document OCR stays slightly below the unquantised model.
 
 Halving the image budget is harder. At 256\,px document OCR falls by about 10 points for every model,
 since small text becomes unreadable, while spatial reasoning is unaffected. Sequence-level MoE-LoRA
-remains within noise of the unquantised model ($-2.2$ points, CI includes zero) and is 1.2 points
-ahead of dense16 at the same resolution (higher on all three tasks). Dense16 is significantly below
-the unquantised model. Task experts seem to help most when the input is compressed, though three seeds
+stays within noise of the unquantised model ($-2.2$, CI includes zero) and 1.2 points ahead of dense16
+(higher on all three tasks), which is significantly below it. Task experts seem to help most when the input is compressed, though three seeds
 are too few to call the 1.2-point gap significant.
 
 On the T4, 4-bit inference is no faster than fp16 (0.49--0.56 vs 0.50\,s per answer); the gain is
@@ -410,31 +410,39 @@ at 4 bits.}
 \label{fig:mopeqbits}
 \end{figure*}
 
-Table~\ref{tab:mopeq} shows that, before fine-tuning, KL-guided allocation beats uniform quantisation at
-every budget (+1.2 points at 4 bits, +2.2 at 3 bits) and matches uniform 4-bit with 11\% less quantised
-memory at 3.5 bits. The gains point the same way at all budgets but are not individually significant
-on 600 test samples ($p=0.13$ and $0.09$). The allocator protects the vision--language merger, the
+Before fine-tuning (Table~\ref{tab:mopeq}), KL-guided allocation beats uniform quantisation at every
+budget (+1.2 points at 4 bits, +2.2 at 3; $p=0.13$ and $0.09$, so not individually significant on 600
+samples) and matches uniform 4-bit with 11\% less quantised memory at 3.5 bits. The allocator protects the vision--language merger, the
 first and last language MLPs and the first vision block, and spends more bits on the vision encoder
 than on the language model; spatial reasoning gains most (+6 points at the 4-bit budget).
 
 The Hessian proxy fails: its plans lose 15--40 points against uniform quantisation, because it rates
 several units as nearly insensitive and sends them to 2 bits, where the true damage (by KL) is 10--50
 times that at 3 bits. Its ranking correlates weakly with the measured KL (Spearman $\rho=0.17$--$0.27$),
-and 26 of the 89 trace estimates are not even positive; clamped to zero, these units look free to
-quantise. Fig.~\ref{fig:mopeqbits} shows the resulting plans side by side.
+and 26 of the 89 trace estimates are not even positive (Fig.~\ref{fig:klhess}); clamped to zero, these
+units look free to quantise. Fig.~\ref{fig:mopeqbits} shows the resulting plans side by side.
 
-We blame the noisy, low-budget estimate and the second-order approximation at 2--3 bits rather than
-Hessian-aware allocation itself; on edge-scale compute, a 20-minute direct KL probe is more reliable.
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\columnwidth]{figs/kl_vs_hessian.pdf}
+\caption{Hessian-trace versus measured KL sensitivity of the 89 units at 3 bits. Units whose trace
+estimate is $\le 0$ are drawn at the floor of the plot.}
+\label{fig:klhess}
+\end{figure}
 
-After fine-tuning the picture changes. moe\_seq trained on uniform HQQ 4-bit reaches 79.6\,$\pm$\,0.8,
+We blame the noisy, low-budget estimate and the second-order approximation at 2--3 bits, not
+Hessian-aware allocation itself; on edge-scale compute a 20-minute direct KL probe is more reliable.
+
+After fine-tuning, moe\_seq on uniform HQQ 4-bit reaches 79.6\,$\pm$\,0.8,
 significantly above the full-precision model ($p=0.01$) with 2.4$\times$ less weight memory (1724 vs
 4213\,MiB; peak 1909 vs 4325\,MiB), and 1.9 points above the same recipe on NF4 (95\% CI $[+0.0,+3.8]$, $p=0.02$). On the KL-guided 3.5-bit base it reaches
 78.0, saving 94\,MiB but losing 1.6 points: as with the fp16 vision encoder above, the adapters absorb
 most of the quantisation error, so a better uniform quantiser helps more than a cleverer allocation.
-HQQ's dequantisation in PyTorch makes inference about twice as slow as NF4 on the T4 (1.0 vs 0.56\,s
-per answer), so the NF4 numbers remain our latency reference.
+HQQ dequantisation in PyTorch is about twice as slow as NF4 on the T4 (1.0 vs 0.56\,s per answer), so
+NF4 remains our latency reference.
 
 \section{Conclusion}
+\label{sec:concl}
 Our sequence-level MoE-LoRA, trained on one T4 GPU, achieves on held-out test data:
 \begin{itemize}\setlength{\itemsep}{0pt}
 \item \emph{Better than full precision at less than half the memory:} on an HQQ 4-bit base, MoE-LoRA
@@ -454,7 +462,10 @@ stays within noise of the fp16 model and 1.2 points ahead of dense LoRA.
 Hessian estimate fails, and after fine-tuning a good uniform quantiser is the best choice.
 \end{itemize}
 Limitations: three tasks of 400 training samples, one 2B backbone, task profiles that assume the task is
-known, and HQQ being slower than NF4 in PyTorch.
+known, and HQQ being slower than NF4 in PyTorch. Expert-level mixed precision as in MoPEQ gives little here,
+because our experts are 2.3\% of the parameters and are folded away. We expect it to matter when experts
+are a large share of the weights: pretrained MoE VLMs, larger experts that must stay unfolded, or
+10B-scale backbones where a few gigabytes decide whether a model fits on an edge device.
 
 \bibliographystyle{IEEEtran}
 \bibliography{refs}
