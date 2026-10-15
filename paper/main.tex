@@ -164,9 +164,9 @@ task profile reproduces the routed computation whenever the router's choice agre
 \textbf{Data.} 400/50/200 training/development/test samples per task from DocVQA~\cite{mathew2021docvqa}
 (document\_ocr), ChartQA~\cite{masry2022chartqa} (chart\_qa) and VSR~\cite{liu2023vsr} (spatial\_reasoning),
 1200/150/600 in total. Metrics: ANLS~\cite{biten2019stvqa} for documents, relaxed accuracy for charts and
-accuracy on True/False for VSR; we report their macro average. The development set is used for epoch
-selection only; with 50 samples per task its rankings are noisy (differences of a few points on one
-task are a handful of questions), so all comparisons are made on the four times larger test set.
+accuracy on True/False for VSR; we report their macro average. The development set (50 samples per task, where a few
+points on one task are a handful of questions) is used only for epoch selection; all comparisons use the
+four times larger test set.
 
 \textbf{Model and training.} Qwen2-VL-2B-Instruct with the language model in 4-bit NF4 (double
 quantisation, fp16 compute). Images are resized by the processor to at most 401{,}408 pixels
@@ -177,10 +177,10 @@ and \emph{moe\_seq} (the same with sequence-level routing). AdamW, learning rate
 ($10^{-3}$ for routers), cosine schedule with 5\% warm-up, batch 1 with 8-step accumulation, 2 epochs,
 gradient checkpointing; $\lambda_{KD}=1$, $\lambda_{lb}=0.01$, $\lambda_z=10^{-3}$. One run takes 64--69
 minutes on one T4. We ran seeds 0--2 for dense16 and moe\_seq, 0--1 for moe and seed 0 for
-dense64; re-running a seed gives the same score to the last digit. Significance: paired bootstrap over test samples (stratified by
+dense64; reruns reproduce scores to the last digit. Significance: paired bootstrap over test samples (stratified by
 task, 10{,}000 resamples, per-sample scores averaged over seeds).
 
-\textbf{Hardware.} Training and accuracy evaluation: NVIDIA T4 (16\,GB). Edge measurements: HP Victus laptop,
+\textbf{Hardware.} Training and evaluation: NVIDIA T4 (16\,GB); edge: HP Victus laptop,
 GTX~1650 (4\,GB, no tensor cores), Intel i5-12450H, 8\,GB RAM. Greedy decoding, batch 1.
 
 \section{Results}
@@ -204,11 +204,11 @@ moe\_seq (3) & 73.0 & 84.4 & 75.8 & 77.7\scriptsize{$\pm$0.9} & $-0.7$ [$-1.7,+0
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:main} shows that every adapter improves the 4-bit base model by 6--7 points. The
+Every adapter improves the 4-bit base model by 6--7 points (Table~\ref{tab:main}). The
 sequence-level MoE is statistically indistinguishable from dense LoRA, while token-level routing is
 measurably worse ($-1.4$, CI upper bound 0.0). A four times larger dense adapter (dense64) brings no gain,
-so adapter capacity does not limit accuracy in this setting. On the development set moe\_seq was ahead (84.8 vs
-84.6), which did not hold on test, so we make no claim that MoE improves accuracy.
+so adapter capacity does not limit accuracy in this setting. moe\_seq led on the development set (84.8 vs
+84.6) but not on test, so we do not claim that MoE improves accuracy.
 
 \begin{figure}[t]
 \centering
@@ -225,8 +225,7 @@ Fig.~\ref{fig:pertask} breaks the scores down by task. Quantisation hurts spatia
 \subsection{Expert specialisation}
 \begin{table}[t]
 \centering
-\caption{Mutual information between task and chosen expert (bits; maximum $\log_2 3=1.585$),
-development set, mean over the 28 layers.}
+\caption{Task--expert mutual information (bits; max.\ $\log_2 3=1.585$), development set, mean over 28 layers.}
 \label{tab:mi}
 \setlength{\tabcolsep}{4pt}
 \begin{tabular}{lccc}
@@ -239,9 +238,9 @@ Sequence-level (moe\_seq) & 0.526 & 0.469 & 0.436 \\
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:mi} measures how much the router's choice reveals about the task. Token-level routing
-spreads every task over all experts; sequence-level routing carries about ten times more task information
-in every seed, although the model never sees a task label. In the most specialised layer of seed 0,
+Table~\ref{tab:mi} measures how much the router's choice reveals about the task: token-level routing
+spreads every task over all experts, while sequence-level routing carries about ten times more task
+information in every seed without ever seeing a task label. In the most specialised layer of seed 0,
 charts, documents and spatial questions go to three different experts in 100\%, 84\% and 94\% of cases.
 Charts and documents often share an expert in other layers, consistent with both requiring text reading.
 Which layers specialise varies between seeds; some collapse to one expert and act as a dense LoRA. Fig.~\ref{fig:routing} shows the per-layer picture over all seeds.
@@ -279,7 +278,7 @@ dense16, folded & 2054\,MiB & 3.08\,s & 18.7 tok/s \\
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:edge} shows that a folded checkpoint has exactly the memory and speed of the base model,
+A folded checkpoint has exactly the memory and speed of the base model (Table~\ref{tab:edge}),
 while keeping the router costs 11\% more memory and 24\% slower decoding. About 2.9\,s of the 3.1\,s
 latency is the prefill pass, dominated by the vision encoder, so the number of image tokens is the main
 lever for latency. The fp16 model's 4.1\,GB of weights do not fit this GPU's 4\,GB. Without tensor cores, fp16 matrix
@@ -336,11 +335,11 @@ document OCR stays slightly below the unquantised model.
 Halving the image budget is harder. At 256\,px document OCR falls by about 10 points for every model,
 since small text becomes unreadable, while spatial reasoning is unaffected. Sequence-level MoE-LoRA
 stays within noise of the unquantised model ($-2.2$, CI includes zero) and 1.2 points ahead of dense16
-(higher on all three tasks), which is significantly below it. Task experts seem to help most when the input is compressed, though three seeds
-are too few to call the 1.2-point gap significant.
+(higher on all three tasks), which is significantly below it; task experts seem to help most on compressed
+input, though three seeds are too few to call the 1.2-point gap significant.
 
 On the T4, 4-bit inference is no faster than fp16 (0.49--0.56 vs 0.50\,s per answer); the gain is
-memory, which is what decides whether a model runs on the 4\,GB GTX~1650.
+memory, which decides whether a model fits the 4\,GB GTX~1650.
 
 \subsection{Where the 4-bit loss comes from}
 Table~\ref{tab:vis} keeps one component of the base in fp16 and quantises the rest to NF4 (test, 512\,px).
@@ -349,9 +348,8 @@ quantisation for 949\,MiB, an fp16 language model 3.2 points for 1875\,MiB, abou
 megabyte. The vision encoder matters most for document and chart reading, the language model for
 spatial reasoning. After fine-tuning, however, the difference almost vanishes: with an fp16 vision
 encoder dense16 reaches 78.6 (vs 78.4 with a 4-bit encoder) and moe\_seq 78.0 (vs 77.7), for
-about 1\,GB more memory. The adapters, trained on top of the quantised encoder with distillation from
-the fp16 model, absorb the quantisation error, so a uniformly 4-bit base is the better trade-off for
-edge deployment.
+about 1\,GB more memory. Trained on the quantised encoder with distillation from the fp16 model,
+the adapters absorb the quantisation error, so a uniform 4-bit base is the better edge trade-off.
 
 \begin{table}[t]
 \centering
@@ -438,7 +436,7 @@ units look free to quantise. Fig.~\ref{fig:mopeqbits} shows the resulting plans 
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.85\columnwidth]{figs/kl_vs_hessian.pdf}
+\includegraphics[width=0.75\columnwidth]{figs/kl_vs_hessian.pdf}
 \caption{Hessian-trace versus measured KL sensitivity of the 89 units at 3 bits. Units whose trace
 estimate is $\le 0$ are drawn at the floor of the plot.}
 \label{fig:klhess}
