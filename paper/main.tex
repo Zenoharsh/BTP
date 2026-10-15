@@ -223,11 +223,25 @@ Fig.~\ref{fig:pertask} breaks the scores down by task. Quantisation hurts spatia
 (69.0 to 60.5), and every adapter more than recovers it.
 
 \subsection{Expert specialisation}
-The mutual information between task and chosen expert (development set, mean over the 28 layers;
-maximum $\log_2 3=1.585$ bits) measures how much the router's choice reveals about the task. Token-level
-routing spreads every task over all experts (0.051 and 0.046 bits for its two seeds). Sequence-level
-routing reaches 0.526, 0.469 and 0.436 bits, roughly ten times more in every seed, although the model
-never sees a task label. In the most specialised layer of seed 0,
+\begin{table}[t]
+\centering
+\caption{Mutual information between task and chosen expert (bits; maximum $\log_2 3=1.585$),
+development set, mean over the 28 layers.}
+\label{tab:mi}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lccc}
+\toprule
+Routing & Seed 0 & Seed 1 & Seed 2 \\
+\midrule
+Token-level (moe) & 0.051 & 0.046 & -- \\
+Sequence-level (moe\_seq) & 0.526 & 0.469 & 0.436 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:mi} measures how much the router's choice reveals about the task. Token-level routing
+spreads every task over all experts; sequence-level routing carries about ten times more task information
+in every seed, although the model never sees a task label. In the most specialised layer of seed 0,
 charts, documents and spatial questions go to three different experts in 100\%, 84\% and 94\% of cases.
 Charts and documents often share an expert in other layers, consistent with both requiring text reading.
 Which layers specialise varies between seeds; some collapse to one expert and act as a dense LoRA. Fig.~\ref{fig:routing} shows the per-layer picture over all seeds.
